@@ -3,6 +3,7 @@ import { PARAMS as P } from './params';
 import type { Grain, State, Theme } from './types';
 import { loadState, saveState, exportJson, parseImportedJson } from './store';
 import { cull, displayedGrains, effectiveAge, isOpenQuestion, tierOf, touch } from './ecosystem';
+import { buildSampleState } from './sample';
 
 // ---------- 状態 ----------
 let state: State = loadState();
@@ -44,6 +45,14 @@ window.addEventListener('beforeunload', () => {
   saveState(state);
 });
 
+// タブが隠れた瞬間にも保存(モバイルやクラッシュ対策)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    state.ecoSeconds = eco;
+    saveState(state);
+  }
+});
+
 // ---------- 変異の共通処理 ----------
 function commit(): void {
   cull(state, eco);
@@ -73,6 +82,11 @@ function newGrain(text: string, opts: { parents?: string[]; attachedTo?: string 
 }
 
 // ---------- 操作 ----------
+
+// 日本語IMEの変換確定Enterで誤送信しないためのガード
+elLaunchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.isComposing) e.preventDefault();
+});
 
 // 打ち上げ / 参照系での追記 / 合流
 elLauncher.addEventListener('submit', (e) => {
@@ -212,6 +226,19 @@ function renderNow(): void {
 
   const grains = displayedGrains(state, eco).sort((a, b) => b.lastTouchEco - a.lastTouchEco);
   const n = grains.length;
+
+  // まっさらな状態: サンプル読み込みの案内だけ静かに置く
+  if (state.grains.length === 0) {
+    const hint = document.createElement('div');
+    hint.textContent = '例のデータで始める';
+    hint.style.cssText =
+      'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:#3a4152;font-size:13px;cursor:pointer;';
+    hint.addEventListener('mouseenter', () => (hint.style.color = '#6b7280'));
+    hint.addEventListener('mouseleave', () => (hint.style.color = '#3a4152'));
+    hint.addEventListener('click', () => loadSample(false));
+    elField.appendChild(hint);
+    return;
+  }
 
   grains.forEach((g, i) => {
     const effAge = effectiveAge(g, eco);
@@ -360,7 +387,7 @@ function renderSearch(): void {
         if (revive(g.id, input.value)) renderSearch();
       });
       input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
+        if (e.key === 'Enter' && !e.isComposing) {
           e.preventDefault();
           if (revive(g.id, input.value)) renderSearch();
         }
@@ -408,7 +435,7 @@ function renderToolbar(): void {
     const stickerInput = document.createElement('input');
     stickerInput.placeholder = '付箋を貼る（Enter）';
     stickerInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.isComposing) {
         e.preventDefault();
         const t = stickerInput.value.trim();
         if (t) addSticker(g.id, t);
@@ -491,6 +518,21 @@ window.addEventListener('resize', () => {
   if (currentView === 'now') renderNow();
 });
 
+// ---------- サンプルデータ ----------
+function loadSample(needConfirm: boolean): void {
+  if (needConfirm && state.grains.length > 0) {
+    if (!window.confirm('現在のデータをサンプルで置き換えます。よろしいですか?（先に「書き出し」で退避できます）')) return;
+  }
+  state = buildSampleState();
+  eco = state.ecoSeconds;
+  selection = [];
+  cull(state, eco);
+  saveState(state);
+  showView('now');
+}
+
+$('#btn-sample').addEventListener('click', () => loadSample(true));
+
 // ---------- エクスポート / インポート ----------
 $('#btn-export').addEventListener('click', () => {
   state.ecoSeconds = eco;
@@ -526,4 +568,6 @@ function fmtDate(ms: number): string {
 }
 
 // ---------- 起動 ----------
+cull(state, eco); // 前回終了後の状態でも規律を守らせてから描画
+saveState(state);
 showView('now');

@@ -25,17 +25,26 @@ export function touch(g: Grain, eco: number): void {
 export function displayedGrains(state: State, eco: number): Grain[] {
   void eco;
   const out: Grain[] = [];
-  const reps = new Map<string, Grain>();
+  // 代表粒は付箋でない粒を優先する(付箋しか生きていないテーマだけ付箋が代表になる)
+  const repsMain = new Map<string, Grain>();
+  const repsAny = new Map<string, Grain>();
   for (const g of state.grains) {
     if (g.status !== 'alive') continue;
     if (!g.themeId) {
       out.push(g);
       continue;
     }
-    const cur = reps.get(g.themeId);
-    if (!cur || g.lastTouchEco > cur.lastTouchEco) reps.set(g.themeId, g);
+    const anyCur = repsAny.get(g.themeId);
+    if (!anyCur || g.lastTouchEco > anyCur.lastTouchEco) repsAny.set(g.themeId, g);
+    if (!g.attachedToId) {
+      const mainCur = repsMain.get(g.themeId);
+      if (!mainCur || g.lastTouchEco > mainCur.lastTouchEco) repsMain.set(g.themeId, g);
+    }
   }
-  return out.concat([...reps.values()]);
+  for (const [themeId, g] of repsAny) {
+    out.push(repsMain.get(themeId) ?? g);
+  }
+  return out;
 }
 
 // 沈降。警告なし・無音。変更があれば true。
