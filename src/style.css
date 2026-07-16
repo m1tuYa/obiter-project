@@ -68,6 +68,26 @@ button.ghost:hover, label.ghost:hover, button.nav:hover { color: var(--fg); }
   cursor: pointer;
 }
 
+.structure {
+  position: absolute;
+  max-width: 240px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dim);
+  z-index: 10;
+}
+.structure .s-label {
+  color: #3a4152;
+  font-size: 9px;
+  margin-top: 4px;
+  letter-spacing: 2px;
+}
+.structure .s-item { cursor: pointer; }
+.structure .s-item:hover { color: var(--fg); }
+.structure .s-item.dead { color: #3a4152; cursor: default; }
+.structure .s-item.dead:hover { color: #3a4152; }
+.structure .s-item.question { color: var(--accent); }
+
 #center-dot {
   position: absolute;
   left: 50%; top: 50%;

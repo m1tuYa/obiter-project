@@ -29,15 +29,19 @@ const grainById = (id: string) => state.grains.find((g) => g.id === id);
 const themeById = (id: string) => state.themes.find((t) => t.id === id);
 
 // ---------- 生態系時刻（滞在時間でのみ進む。不在中は凍結） ----------
+let tickCount = 0;
 setInterval(() => {
   if (document.hidden || !document.hasFocus()) return;
-  eco++;
+  tickCount++;
+  eco += P.DEBUG_TIME_SCALE; // 通常は1。デバッグ時のみ早送り
   state.ecoSeconds = eco;
-  if (eco % 5 === 0 && cull(state, eco)) {
+  if (tickCount % 5 === 0 && cull(state, eco)) {
     if (currentView === 'now') renderNow();
   }
-  if (eco % 15 === 0) saveState(state);
-  if (eco % 60 === 0 && currentView === 'now') renderNow(); // 冷えの見た目を更新
+  if (tickCount % 15 === 0) saveState(state);
+  // 冷えの見た目を更新（早送り中は頻繁に）
+  const redrawEvery = P.DEBUG_TIME_SCALE > 1 ? 5 : 60;
+  if (tickCount % redrawEvery === 0 && currentView === 'now') renderNow();
 }, 1000);
 
 window.addEventListener('beforeunload', () => {
@@ -240,6 +244,8 @@ function renderNow(): void {
     return;
   }
 
+  const grainEls = new Map<string, { el: HTMLElement; x: number; y: number }>();
+
   grains.forEach((g, i) => {
     const effAge = effectiveAge(g, eco);
     const tier = tierOf(effAge);
@@ -292,7 +298,93 @@ function renderNow(): void {
     });
 
     elField.appendChild(div);
+    grainEls.set(g.id, { el: div, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
   });
+
+  resolveOverlaps([...grainEls.values()].map((v) => v.el));
+
+  // 構造は召喚されるもの: 選択中の粒の幹(親)と付箋だけを、その粒のそばに浮かべる
+  if (selection.length === 1) {
+    const g = grainById(selection[0]);
+    const pos = g && grainEls.get(g.id);
+    if (g && pos) renderStructure(g, pos.x, pos.y, w);
+  }
+}
+
+// 重なった粒は冷たい側(後に描画された側)のフォントを段階的に縮める
+function resolveOverlaps(els: HTMLElement[]): void {
+  const GAP = 4;
+  for (let pass = 0; pass < 6; pass++) {
+    let collided = false;
+    const rects = els.map((el) => el.getBoundingClientRect());
+    for (let i = 0; i < els.length; i++) {
+      for (let j = i + 1; j < els.length; j++) {
+        const a = rects[i];
+        const b = rects[j];
+        const overlap =
+          a.left < b.right + GAP && b.left < a.right + GAP && a.top < b.bottom + GAP && b.top < a.bottom + GAP;
+        if (!overlap) continue;
+        // els は熱い順に並んでいるので j 側(冷たい側)を縮める。下限に達したら i 側も縮める
+        const target = shrinkFont(els[j]) ? els[j] : shrinkFont(els[i]) ? els[i] : null;
+        if (target) {
+          collided = true;
+          rects[els.indexOf(target)] = target.getBoundingClientRect();
+        }
+      }
+    }
+    if (!collided) break;
+  }
+}
+
+function shrinkFont(el: HTMLElement): boolean {
+  const cur = parseFloat(el.style.fontSize || '14');
+  const next = Math.max(P.OVERLAP_MIN_FONT_PX, cur * P.OVERLAP_SHRINK_FACTOR);
+  if (next >= cur) return false;
+  el.style.fontSize = `${next}px`;
+  return true;
+}
+
+// 選択中の粒の幹と付箋(保存された事実のみ)を小さく浮かべる
+function renderStructure(g: Grain, x: number, y: number, fieldWidth: number): void {
+  const parents = g.parentIds.map((id) => grainById(id)).filter((p): p is Grain => !!p);
+  const stickers = state.grains.filter((s) => s.attachedToId === g.id);
+  if (parents.length === 0 && stickers.length === 0) return;
+
+  const panel = document.createElement('div');
+  panel.className = 'structure';
+  panel.style.left = `${Math.min(Math.max(x - 120, 8), fieldWidth - 248)}px`;
+  panel.style.top = `${y + 26}px`;
+
+  const addSection = (label: string, items: Grain[]) => {
+    if (items.length === 0) return;
+    const lab = document.createElement('div');
+    lab.className = 's-label';
+    lab.textContent = label;
+    panel.appendChild(lab);
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 's-item';
+      if (item.status !== 'alive') row.classList.add('dead');
+      if (isOpenQuestion(item)) row.classList.add('question');
+      row.textContent =
+        clip(item.text, 36) + (item.status === 'drifted' ? ' ・漂流' : item.status === 'closed' ? ' ・閉幕' : '');
+      if (item.status === 'alive') {
+        // 幹をたどる移動。選択は接触に数えない
+        row.addEventListener('click', (e) => {
+          e.stopPropagation();
+          selection = [item.id];
+          renderNow();
+          renderToolbar();
+          renderLauncherPlaceholder();
+        });
+      }
+      panel.appendChild(row);
+    }
+  };
+
+  addSection('幹', parents);
+  addSection('付箋', stickers);
+  elField.appendChild(panel);
 }
 
 // テーマの尾: 系譜順の一本の読み物。先端が最初に見える
@@ -514,11 +606,17 @@ function renderLauncherPlaceholder(): void {
   }
 }
 
-// Escで選択解除
+// Escで選択解除 / Deleteで閉幕（入力中は無効）
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && selection.length > 0) {
     selection = [];
     render();
+    return;
+  }
+  const a = document.activeElement;
+  const typing = a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement;
+  if (e.key === 'Delete' && !typing && currentView === 'now' && selection.length > 0) {
+    closeGrains([...selection]);
   }
 });
 

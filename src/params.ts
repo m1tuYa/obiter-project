@@ -24,8 +24,16 @@ export const PARAMS = {
     { upToSeconds: Infinity, fontSizePx: 12, opacity: 0.35 }, // 沈降間際
   ],
 
+  // 【デバッグ用】時間の早送り倍率。1 = 通常。60 にすると現実の1秒で生態系が60秒進む。
+  // 沈降の循環を短時間で観察したいときだけ変更し、検証本番では必ず 1 に戻すこと。
+  DEBUG_TIME_SCALE: 1,
+
   // 「今」の面で1粒あたりに表示する最大文字数（超過は…で切る）
   NOW_TEXT_CLIP: 48,
+
+  // 重なり防止: 粒同士が重なったとき、冷たい側のフォントを縮める倍率と下限
+  OVERLAP_SHRINK_FACTOR: 0.85,
+  OVERLAP_MIN_FONT_PX: 8,
 
   // 放射配置の内側/外側の半径（画面短辺に対する比率）
   RADIUS_MIN_RATIO: 0.12,
