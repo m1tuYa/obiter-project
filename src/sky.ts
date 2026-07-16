@@ -7,14 +7,14 @@ import { displayedGrains, effectiveAge, isOpenQuestion, tierOf } from './ecosyst
 // 空の規律:
 // - 各星は固有の角度を持つ。誕生・ドラッグでのみ決まり、他の星の出来事では動かない
 // - 空全体が同じ角速度でゆっくり回る。星座は形を保つ
-// - 温度は半径(外へ沈む)と文字の大きさ・濃さで表現される
-// - 打ち上げ=地面から発つ(粒は惑星の縁から自分の軌道へ昇る)
-// - 突入=一瞬燃えて惑星に積もる。惑星はわずかに膨らむ(祝わないが、確かに育つ)
+// - 星は点、文字はそのラベル。デフォルトは点の下・中央揃えだが、
+//   他の星と被るときはラベルが右・左・上へ逃げる(被らないこと・読めることが最優先)
+// - 打ち上げ=地表の上側から弧を描いて自分の軌道へ。突入=逆の弧で地表へ落ちる隕石
 //
 // ズームの連続体(俯瞰⇄地表):
-// - 俯瞰では惑星はただの丸。ズームインすると惑星が育ちながら画面下方へ沈み、
-//   最大ズームで惑星の上端(地表)が画面中央に来る——足元に地層、頭上に熱い粒
-// - 地表に近づくと断面(閉幕した粒の堆積)が点として現れ、最接近で墓碑銘まで読める
+// - 俯瞰では惑星はただの丸。ズームインすると惑星が沈み、地平線が画面下側(約7割の高さ)に固定される
+// - 地表視点は「地表が下・空が上」で固定。ダイヤル(ドラッグ)を回すと、
+//   頭上の星々と足元の断面(閉幕の堆積)が一緒に流れ、最近の思考を遡れる
 
 export interface SkyHooks {
   getState(): State;
@@ -45,52 +45,54 @@ interface DrawnItem {
   phantom?: boolean;
 }
 
+type LayoutMode = 'below' | 'above' | 'right' | 'left';
+
 const FONT_STACK = '"Hiragino Sans", "Yu Gothic UI", sans-serif';
 const COLOR_FG = '216, 222, 233';
 const COLOR_ACCENT = '229, 192, 123';
 const COLOR_THEME = '138, 180, 216';
-const COLOR_EMBER = '229, 192, 123'; // 突入の燃焼・地層の残り火
+const COLOR_EMBER = '229, 192, 123';
 
 function smoothstep(x: number, a: number, b: number): number {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
 }
-
 function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
+}
+function easeInOut(t: number): number {
+  return t * t * (3 - 2 * t);
+}
+function lerpAngle(a: number, b: number, t: number): number {
+  const d = ((((b - a + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) - Math.PI;
+  return a + d * t;
 }
 
 export class Sky {
   private ctx: CanvasRenderingContext2D;
   private zoom = 1;
   private manualRot = 0;
-  private animT = 0; // フォーカス中だけ進む(不在中は空も凍結)
+  private animT = 0;
   private lastFrame = 0;
   private frameDt = 0;
   private drawn: DrawnItem[] = [];
 
-  // 参照系
   private refId: string | null = null;
   private refFrozenAngle = 0;
   private lastRefOffset = 0;
 
-  // フォーカスのカメラ(視点は揮発)
   private camX = 0;
   private camY = 0;
 
-  // 直近フレームの幾何(入力処理用)
-  private lastCenterX = 0; // 惑星中心
+  private lastCenterX = 0;
   private lastCenterY = 0;
   private lastPlanetR = 0;
 
-  // 惑星のなめらかな成長(突入で膨らむ)
   private smoothClosed: number | null = null;
 
-  // エフェクト
-  private launchFx = new Map<string, number>(); // grainId -> 開始animT
-  private entryFx: { fromX: number; fromY: number; start: number }[] = [];
+  private launchFx = new Map<string, number>();
+  private entryFx: { angle0: number; r0: number; start: number }[] = [];
 
-  // 入力状態
   private pointerMode: 'none' | 'dial' | 'grain' = 'none';
   private dragMoved = false;
   private downAngle = 0;
@@ -131,15 +133,16 @@ export class Sky {
     return item ? { x: item.dotX, y: item.dotY } : null;
   }
 
-  // 打ち上げ: 粒が地面から自分の軌道へ昇る
   noteLaunch(grainId: string): void {
     this.launchFx.set(grainId, this.animT);
   }
 
-  // 突入: 現在位置から惑星へ落ち、一瞬燃えて積もる
   noteEntry(grainId: string): void {
     const pos = this.project(grainId);
-    if (pos) this.entryFx.push({ fromX: pos.x, fromY: pos.y, start: this.animT });
+    if (!pos) return;
+    const angle0 = Math.atan2(pos.y - this.lastCenterY, pos.x - this.lastCenterX);
+    const r0 = Math.hypot(pos.x - this.lastCenterX, pos.y - this.lastCenterY);
+    this.entryFx.push({ angle0, r0, start: this.animT });
   }
 
   // ---------- 力学 ----------
@@ -150,6 +153,11 @@ export class Sky {
 
   private currentAngle(g: Grain): number {
     return (g.angle ?? 0) + this.animT * this.omega;
+  }
+
+  // 地表の「上側」(惑星中心から画面中央方向)の角度
+  private upAngle(cx: number, cy: number, cw: number, ch: number): number {
+    return Math.atan2(ch / 2 - cy, cw / 2 - cx);
   }
 
   // ---------- 描画ループ ----------
@@ -185,12 +193,13 @@ export class Sky {
     const closedCount = state.grains.filter((g) => g.status === 'closed').length;
     if (this.smoothClosed === null) this.smoothClosed = closedCount;
     this.smoothClosed += (closedCount - this.smoothClosed) * (1 - Math.exp(-3 * this.frameDt));
-    const planetBase = Math.min(short * 0.1, 22 + Math.sqrt(this.smoothClosed) * 4) * this.zoom;
+    const planetBase = Math.min(short * 0.12, 26 + Math.sqrt(this.smoothClosed) * 4.5) * Math.min(this.zoom, 1.5);
 
     // ---- 地表への連続遷移 ----
-    // t=0: 俯瞰(惑星は画面中央の丸)。t=1: 地表(惑星の上端が画面中央)
     const surfaceT = smoothstep(this.zoom, P.SURFACE_START_ZOOM, P.SURFACE_FULL_ZOOM);
-    const planetR = planetBase + (short * 1.35 - planetBase) * surfaceT;
+    const planetR = planetBase + (short * 1.5 - planetBase) * surfaceT;
+    // 地平線を画面の約72%の高さに置く(地表の占有は下側3割弱)
+    const surfaceOffset = surfaceT * (planetR + ch * 0.22);
 
     // 選択粒の星座の縁者
     const relativeIds = new Set<string>();
@@ -206,10 +215,13 @@ export class Sky {
       }
     }
 
-    // ---- 位置の事前計算(惑星中心からの相対) ----
+    // ---- 位置の事前計算 ----
     const grains = displayedGrains(state, eco).sort((a, b) => b.lastTouchEco - a.lastTouchEco);
-    const rMin = Math.max(short * P.RADIUS_MIN_RATIO * this.zoom, planetR + 34);
-    const rMax = Math.max(short * P.RADIUS_MAX_RATIO * this.zoom, rMin + short * 0.35);
+    // 半径: 俯瞰では画面比、地表では地平線の上の帯(空)に収める
+    const rMinOver = Math.max(short * P.RADIUS_MIN_RATIO * Math.min(this.zoom, 1.5), planetBase + 34);
+    const rMaxOver = short * P.RADIUS_MAX_RATIO * Math.min(this.zoom, 1.6);
+    const rMin = rMinOver + (planetR + 52 - rMinOver) * surfaceT;
+    const rMax = Math.max(rMaxOver + (planetR + ch * 0.56 - rMaxOver) * surfaceT, rMin + 140);
 
     let refOffset = 0;
     if (this.refId) {
@@ -221,6 +233,9 @@ export class Sky {
       }
     }
     this.lastRefOffset = refOffset;
+
+    // 打ち上げの出発点(前フレームの幾何でよい)
+    const prevUp = this.upAngle(this.lastCenterX, this.lastCenterY, cw, ch);
 
     interface Pending {
       g: Grain;
@@ -241,50 +256,54 @@ export class Sky {
       question: boolean;
       frac: number;
       dotR: number;
-      launching: number; // 0..1 打ち上げの進捗(1=完了)
+      launching: number;
       x: number;
       y: number;
     }
     const pendings: Pending[] = [];
 
+    const fontScale = Math.min(1.3, Math.max(0.8, Math.pow(this.zoom, 0.3)));
+    const dotScale = Math.min(1.25, Math.max(0.7, Math.sqrt(this.zoom)));
+
     for (const g of grains) {
       const effAge = effectiveAge(g, eco);
       const frac = Math.min(1, effAge / P.SINK_AGE_SECONDS);
       const tier = tierOf(effAge);
-      const angle = this.currentAngle(g) - refOffset + this.manualRot;
+      let angle = this.currentAngle(g) - refOffset + this.manualRot;
       let r = rMin + Math.pow(frac, 0.6) * (rMax - rMin);
 
-      // 打ち上げ: 惑星の縁から軌道へ(入力は一切待たせない。背後で昇る)
+      // 打ち上げ: 地表の上側から、ゆっくり弧を描いて自分の軌道へ
       let launching = 1;
       const fxStart = this.launchFx.get(g.id);
       if (fxStart !== undefined) {
-        const e = (this.animT - fxStart) / 0.9;
+        const e = (this.animT - fxStart) / 1.6;
         if (e >= 1) this.launchFx.delete(g.id);
         else {
-          launching = easeOutCubic(Math.max(0, e));
-          r = planetR + 3 + (r - planetR - 3) * launching;
+          launching = Math.max(0, e);
+          angle = lerpAngle(prevUp, angle, easeInOut(launching));
+          r = planetR + 4 + (r - planetR - 4) * easeOutCubic(launching);
         }
       }
 
       const focused = g.id === focusedId;
       const relative = relativeIds.has(g.id);
 
-      let fontPx = tier.fontSizePx * Math.pow(this.zoom, 0.9);
+      let fontPx = tier.fontSizePx * fontScale;
       let alpha = tier.opacity;
-      let budget = Math.round((14 + 60 * (1 - frac)) * this.zoom);
+      let budget = Math.round((16 + 60 * (1 - frac)) * Math.min(this.zoom, 1.6));
       let maxLines = 3;
       if (focused) {
-        fontPx = Math.max(fontPx, 16);
+        fontPx = Math.max(fontPx, 16.5);
         alpha = 1;
         budget = Infinity;
         maxLines = 6;
       } else if (relative) {
-        fontPx = Math.max(fontPx, 11.5);
+        fontPx = Math.max(fontPx, 12);
         alpha = Math.max(alpha, 0.85);
         budget = Math.max(budget, 34);
       }
       if (launching < 1) alpha *= 0.35 + 0.65 * launching;
-      const textOnly = focused || relative || !(fontPx < 7 || budget < 4);
+      const textOnly = focused || relative || !(fontPx < 8 || budget < 4);
 
       const theme = g.themeId ? state.themes.find((t) => t.id === g.themeId) : undefined;
       pendings.push({
@@ -305,7 +324,7 @@ export class Sky {
         relative,
         question: isOpenQuestion(g),
         frac,
-        dotR: (2 + 2.5 * (1 - frac)) * Math.sqrt(Math.max(this.zoom, 0.4)),
+        dotR: (2.5 + 3 * (1 - frac)) * dotScale,
         launching,
         x: 0,
         y: 0,
@@ -313,7 +332,6 @@ export class Sky {
     }
 
     // ---- カメラ ----
-    const surfaceOffset = surfaceT * planetR;
     let camTX = 0;
     let camTY = 0;
     if (focusedId) {
@@ -327,12 +345,12 @@ export class Sky {
     this.camX += (camTX - this.camX) * k;
     this.camY += (camTY - this.camY) * k;
 
-    // 惑星中心。地表遷移で画面下方へ沈む(上端が画面中央に近づく)
     const cx = cw / 2 + this.camX;
     const cy = ch / 2 + this.camY + surfaceOffset;
     this.lastCenterX = cx;
     this.lastCenterY = cy;
     this.lastPlanetR = planetR;
+    const up = this.upAngle(cx, cy, cw, ch);
 
     const byId = new Map<string, Pending>();
     for (const p of pendings) {
@@ -352,14 +370,7 @@ export class Sky {
       this.dragMoved &&
       Math.hypot(this.dragX - cx, this.dragY - cy) <= dropThreshold;
 
-    const grad = ctx.createRadialGradient(
-      cx - planetR * 0.3,
-      cy - planetR * 0.35,
-      planetR * 0.1,
-      cx,
-      cy,
-      planetR,
-    );
+    const grad = ctx.createRadialGradient(cx - planetR * 0.3, cy - planetR * 0.35, planetR * 0.1, cx, cy, planetR);
     grad.addColorStop(0, '#3a4258');
     grad.addColorStop(0.45, '#2a3040');
     grad.addColorStop(0.8, '#1a1f2c');
@@ -369,58 +380,56 @@ export class Sky {
     ctx.fillStyle = grad;
     ctx.fill();
 
-    // 地平線(地表に近づくほど微かに現れる)
     if (surfaceT > 0.05) {
       ctx.beginPath();
       ctx.arc(cx, cy, planetR, 0, 2 * Math.PI);
-      ctx.strokeStyle = `rgba(150, 170, 210, ${0.14 * surfaceT})`;
+      ctx.strokeStyle = `rgba(150, 170, 210, ${0.15 * surfaceT})`;
       ctx.lineWidth = 1;
       ctx.stroke();
     }
 
-    // ---- 断面(考古学): 閉幕した粒が堆積順に眠る。寄ると墓碑銘が読める ----
+    // ---- 断面(考古学): 閉幕の堆積が円周に沿って眠る。ダイヤルで遡れる ----
     const dotsAlpha = smoothstep(surfaceT, 0.15, 0.5);
-    const textAlpha = smoothstep(surfaceT, 0.72, 0.95);
+    const textAlpha = smoothstep(surfaceT, 0.7, 0.95);
     if (dotsAlpha > 0.01) {
       const buried = state.grains
         .filter((g) => g.status === 'closed')
         .sort((a, b) => (b.closedAtWall ?? b.createdAtWall) - (a.closedAtWall ?? a.createdAtWall))
-        .slice(0, 60);
-      // 画面中央方向(=地表の見えている側)の角度
-      const upAngle = Math.atan2(ch / 2 - cy, cw / 2 - cx);
-      const perRow = 7;
+        .slice(0, 80);
+      // 新しいものほど「上」に近く、遡るほど円周を後ろへ。空と同じ回転に乗る
+      const spacing = textAlpha > 0.02 ? 0.17 : 0.07;
       buried.forEach((g, i) => {
-        const row = Math.floor(i / perRow);
-        const col = i % perRow;
-        const depth = 30 + row * (textAlpha > 0.02 ? 46 : 26);
-        if (depth + 8 > planetR) return;
-        const spread = (col - (perRow - 1) / 2) * ((textAlpha > 0.02 ? 150 : 34) / planetR);
+        const ba = up - (i + 0.6) * spacing + this.manualRot - refOffset + this.animT * this.omega * 0.0; // 断面はダイヤルにのみ従う
+        const angle = ba;
+        const depth = 42 + i * 2.5;
+        if (depth + 10 > planetR) return;
         const rr = planetR - depth;
-        const bx = cx + rr * Math.cos(upAngle + spread);
-        const by = cy + rr * Math.sin(upAngle + spread);
+        const bx = cx + rr * Math.cos(angle);
+        const by = cy + rr * Math.sin(angle);
+        if (bx < -60 || bx > cw + 60 || by < -60 || by > ch + 60) return;
 
         ctx.beginPath();
-        ctx.arc(bx, by, 1.8, 0, 2 * Math.PI);
-        ctx.fillStyle = `rgba(${COLOR_EMBER}, ${0.28 * dotsAlpha})`;
+        ctx.arc(bx, by, 2.2, 0, 2 * Math.PI);
+        ctx.fillStyle = `rgba(${COLOR_EMBER}, ${0.32 * dotsAlpha})`;
         ctx.fill();
 
         if (textAlpha > 0.02) {
-          ctx.font = `10.5px ${FONT_STACK}`;
+          ctx.font = `12px ${FONT_STACK}`;
           ctx.textAlign = 'left';
           ctx.textBaseline = 'middle';
-          ctx.fillStyle = `rgba(190, 182, 165, ${0.5 * textAlpha})`;
-          const label = clipText(g.text, 20);
-          ctx.fillText(label, bx + 7, by);
+          ctx.fillStyle = `rgba(196, 188, 170, ${0.62 * textAlpha})`;
+          const label = clipText(g.text, 22);
+          ctx.fillText(label, bx + 8, by);
           if (g.closedNote) {
             const w = ctx.measureText(label).width;
-            ctx.fillStyle = `rgba(${COLOR_EMBER}, ${0.34 * textAlpha})`;
-            ctx.fillText(`「${clipText(g.closedNote, 14)}」`, bx + 7 + w + 8, by);
+            ctx.fillStyle = `rgba(${COLOR_EMBER}, ${0.4 * textAlpha})`;
+            ctx.fillText(`「${clipText(g.closedNote, 16)}」`, bx + 8 + w + 8, by);
           }
         }
       });
     }
 
-    // 光暈(粒を掴んで上空に来ると強まる=突入の予告)
+    // 光暈
     const haloAlpha = draggingOverPlanet ? 0.22 : 0.08;
     const haloR = planetR + Math.min(planetR * 0.35, 64) * (draggingOverPlanet ? 1.7 : 1);
     ctx.beginPath();
@@ -464,8 +473,8 @@ export class Sky {
       let prevY = p.y;
       ctx.strokeStyle = `rgba(${COLOR_THEME}, 0.18)`;
       tail.forEach((t, idx) => {
-        const ta = p.angle - (idx + 1) * 0.055;
-        const tr = p.r + (idx + 1) * 9 * Math.sqrt(this.zoom);
+        const ta = p.angle - (idx + 1) * 0.05;
+        const tr = p.r + (idx + 1) * 10;
         const tx = cx + tr * Math.cos(ta);
         const ty = cy + tr * Math.sin(ta);
         ctx.beginPath();
@@ -482,7 +491,7 @@ export class Sky {
       });
     }
 
-    // ---- 粒(星の下に中央揃えの文字) ----
+    // ---- 粒(星+逃げられるラベル) ----
     this.drawn = [];
     const placedRects: Bounds[] = [];
     const GAP = 4;
@@ -495,24 +504,61 @@ export class Sky {
       return pb - pa;
     });
 
+    const layouts: { mode: LayoutMode; dx: number }[] = [
+      { mode: 'below', dx: 0 },
+      { mode: 'right', dx: 0 },
+      { mode: 'left', dx: 0 },
+      { mode: 'above', dx: 0 },
+      { mode: 'below', dx: 44 },
+      { mode: 'below', dx: -44 },
+      { mode: 'above', dx: 44 },
+      { mode: 'above', dx: -44 },
+    ];
+
     for (const p of orderedPendings) {
       let bounds: Bounds;
+      let chosen: { mode: LayoutMode; dx: number } = layouts[0];
+
       if (p.textOnly) {
         const text = p.g.text.length > p.budget ? p.g.text.slice(0, p.budget) + '…' : p.g.text;
+        let placed = false;
         while (true) {
           ctx.font = `${p.fontPx}px ${FONT_STACK}`;
-          const maxLineW = p.focused ? Math.min(460, cw * 0.6) : Math.min(380, Math.max(130, 260 * this.zoom));
+          const maxLineW = p.focused ? Math.min(460, cw * 0.6) : Math.min(360, Math.max(150, 240 * fontScale));
           p.lines = wrapText(ctx, text, maxLineW, p.maxLines);
-          const maxW = Math.max(...p.lines.map((l) => ctx.measureText(l).width), p.dotR * 2);
-          const nameH = p.themeName ? Math.max(9, p.fontPx * 0.62) * 1.5 : 0;
-          const textH = p.lines.length * p.fontPx * 1.42;
-          bounds = {
-            l: p.x - maxW / 2,
-            t: p.y - p.dotR - nameH - 2,
-            r: p.x + maxW / 2,
-            b: p.y + p.dotR + 4 + textH,
-          };
-          if (p.focused || !overlaps(bounds) || p.fontPx <= P.OVERLAP_MIN_FONT_PX) break;
+          const maxW = Math.max(...p.lines.map((l) => ctx.measureText(l).width), 1);
+          const nameH = p.themeName ? Math.max(9.5, p.fontPx * 0.62) * 1.5 : 0;
+          const blockH = nameH + p.lines.length * p.fontPx * 1.42;
+
+          const candidates = p.focused ? [layouts[0]] : layouts;
+          for (const cand of candidates) {
+            const block = blockRect(p.x, p.y, p.dotR, maxW, blockH, cand);
+            bounds = {
+              l: Math.min(block.l, p.x - p.dotR - 2),
+              t: Math.min(block.t, p.y - p.dotR - 2),
+              r: Math.max(block.r, p.x + p.dotR + 2),
+              b: Math.max(block.b, p.y + p.dotR + 2),
+            };
+            if (p.focused || !overlaps(bounds)) {
+              chosen = cand;
+              placed = true;
+              break;
+            }
+          }
+          if (placed || p.fontPx <= P.OVERLAP_MIN_FONT_PX) {
+            if (!placed) {
+              // 最後まで逃げ場がなければデフォルト位置で置く(最小フォント)
+              const block = blockRect(p.x, p.y, p.dotR, maxW, blockH, layouts[0]);
+              bounds = {
+                l: Math.min(block.l, p.x - p.dotR - 2),
+                t: Math.min(block.t, p.y - p.dotR - 2),
+                r: Math.max(block.r, p.x + p.dotR + 2),
+                b: Math.max(block.b, p.y + p.dotR + 2),
+              };
+              chosen = layouts[0];
+            }
+            break;
+          }
           p.fontPx = Math.max(P.OVERLAP_MIN_FONT_PX, p.fontPx * P.OVERLAP_SHRINK_FACTOR);
         }
       } else {
@@ -523,11 +569,11 @@ export class Sky {
       const rgb = p.question ? COLOR_ACCENT : COLOR_FG;
       const alpha = p.selected ? 1 : p.alpha;
 
-      // 打ち上げ中の細い航跡
+      // 打ち上げの航跡
       if (p.launching < 1) {
         const dirX = (p.x - cx) / Math.max(1, Math.hypot(p.x - cx, p.y - cy));
         const dirY = (p.y - cy) / Math.max(1, Math.hypot(p.x - cx, p.y - cy));
-        const trail = 20 * (1 - p.launching);
+        const trail = 22 * (1 - p.launching);
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
         ctx.lineTo(p.x - dirX * trail, p.y - dirY * trail);
@@ -547,31 +593,40 @@ export class Sky {
       ctx.shadowBlur = 0;
 
       let themeRect: DrawnItem['themeRect'];
-      ctx.textAlign = 'center';
 
       if (p.textOnly) {
+        ctx.font = `${p.fontPx}px ${FONT_STACK}`;
+        const maxW = Math.max(...p.lines.map((l) => ctx.measureText(l).width), 1);
+        const nameFont = Math.max(9.5, p.fontPx * 0.62);
+        const nameH = p.themeName ? nameFont * 1.5 : 0;
+        const blockH = nameH + p.lines.length * p.fontPx * 1.42;
+        const block = blockRect(p.x, p.y, p.dotR, maxW, blockH, chosen);
+
+        const align: CanvasTextAlign = chosen.mode === 'right' ? 'left' : chosen.mode === 'left' ? 'right' : 'center';
+        const anchorX = chosen.mode === 'right' ? block.l : chosen.mode === 'left' ? block.r : (block.l + block.r) / 2;
+
+        ctx.textAlign = align;
+        ctx.textBaseline = 'top';
+        let ly = block.t;
         if (p.themeName && p.g.themeId) {
-          const nameFont = Math.max(9, p.fontPx * 0.62);
           ctx.font = `${nameFont}px ${FONT_STACK}`;
-          ctx.textBaseline = 'bottom';
           ctx.fillStyle = `rgba(${COLOR_THEME}, ${Math.min(1, alpha + 0.15)})`;
-          const nameY = p.y - p.dotR - 4;
-          ctx.fillText(p.themeName, p.x, nameY);
+          ctx.fillText(p.themeName, anchorX, ly);
           const w = ctx.measureText(p.themeName).width;
-          themeRect = { x: p.x - w / 2, y: nameY - nameFont * 1.2, w, h: nameFont * 1.4, themeId: p.g.themeId };
+          const nx = align === 'left' ? anchorX : align === 'right' ? anchorX - w : anchorX - w / 2;
+          themeRect = { x: nx, y: ly, w, h: nameFont * 1.4, themeId: p.g.themeId };
+          ly += nameFont * 1.5;
         }
         ctx.font = `${p.fontPx}px ${FONT_STACK}`;
-        ctx.textBaseline = 'top';
         ctx.fillStyle = `rgba(${rgb}, ${alpha})`;
-        const lineH = p.fontPx * 1.42;
-        let ly = p.y + p.dotR + 4;
         for (const line of p.lines) {
-          ctx.fillText(line, p.x, ly);
-          ly += lineH;
+          ctx.fillText(line, anchorX, ly);
+          ly += p.fontPx * 1.42;
         }
       } else if (p.themeName && p.g.themeId) {
-        const nameFont = Math.max(9, 10 * this.zoom);
+        const nameFont = Math.max(9.5, 10 * fontScale);
         ctx.font = `${nameFont}px ${FONT_STACK}`;
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle = `rgba(${COLOR_THEME}, 0.75)`;
         ctx.fillText(p.themeName, p.x, p.y + p.dotR + 3);
@@ -582,7 +637,7 @@ export class Sky {
       this.drawn.push({ g: p.g, dotX: p.x, dotY: p.y, bounds: bounds!, themeRect });
     }
 
-    // ---- ドラッグ中: 落とし先の星を淡くリング表示 ----
+    // ---- ドラッグ中: 落とし先の星にリング ----
     if (this.pointerMode === 'grain' && this.dragMoved && this.dragGrainId) {
       const target = this.findGrainAt(this.dragX, this.dragY, this.dragGrainId);
       if (target) {
@@ -594,45 +649,43 @@ export class Sky {
       }
     }
 
-    // ---- 突入の燃焼(一瞬燃えて、惑星に積もる) ----
+    // ---- 突入: 弧を描いて地表の上側へ落ちる隕石 ----
     this.entryFx = this.entryFx.filter((fx) => {
-      const e = (this.animT - fx.start) / 0.8;
+      const e = (this.animT - fx.start) / 1.3;
       if (e >= 1) return false;
 
-      const dx = fx.fromX - cx;
-      const dy = fx.fromY - cy;
-      const dist = Math.max(1, Math.hypot(dx, dy));
-      const ux = dx / dist;
-      const uy = dy / dist;
-      const ix = cx + ux * planetR; // 着弾点(地表)
-      const iy = cy + uy * planetR;
+      const travel = Math.min(1, e / 0.68);
+      const ang = lerpAngle(fx.angle0, up, easeInOut(travel));
+      const rr = fx.r0 + (planetR - fx.r0) * (travel * travel);
+      const px = cx + rr * Math.cos(ang);
+      const py = cy + rr * Math.sin(ang);
 
-      const fall = Math.min(1, e / 0.55);
-      const fe = fall * fall; // 加速しながら落ちる
-      const px = fx.fromX + (ix - fx.fromX) * fe;
-      const py = fx.fromY + (iy - fx.fromY) * fe;
-
-      if (fall < 1) {
-        // 流星: 燃えながら落ちる
-        const trail = 34 * (0.3 + 0.7 * fall);
+      if (travel < 1) {
+        // 進行方向の後ろへ燃える尾
+        const back = lerpAngle(fx.angle0, up, easeInOut(Math.max(0, travel - 0.06)));
+        const br = fx.r0 + (planetR - fx.r0) * Math.pow(Math.max(0, travel - 0.06), 2);
+        const bx = cx + br * Math.cos(back);
+        const by = cy + br * Math.sin(back);
+        const tg = ctx.createLinearGradient(px, py, bx, by);
+        tg.addColorStop(0, `rgba(${COLOR_EMBER}, 0.9)`);
+        tg.addColorStop(1, `rgba(${COLOR_EMBER}, 0)`);
         ctx.beginPath();
         ctx.moveTo(px, py);
-        ctx.lineTo(px + ux * trail * 0.9, py + uy * trail * 0.9);
-        const tg = ctx.createLinearGradient(px, py, px + ux * trail, py + uy * trail);
-        tg.addColorStop(0, `rgba(${COLOR_EMBER}, 0.85)`);
-        tg.addColorStop(1, `rgba(${COLOR_EMBER}, 0)`);
+        ctx.lineTo(bx, by);
         ctx.strokeStyle = tg;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.2;
         ctx.stroke();
         ctx.beginPath();
-        ctx.arc(px, py, 2.6, 0, 2 * Math.PI);
-        ctx.fillStyle = `rgba(255, 226, 178, ${0.9})`;
+        ctx.arc(px, py, 2.8, 0, 2 * Math.PI);
+        ctx.fillStyle = 'rgba(255, 226, 178, 0.95)';
         ctx.fill();
       } else {
-        // 着弾: 地表で一拍ひかる燐光
-        const fe2 = (e - 0.55) / 0.45;
-        const glowR = 10 + 26 * fe2;
-        const ga = 0.5 * (1 - fe2);
+        // 衝突: 地表で燐光がふくらんで消える
+        const fe2 = (e - 0.68) / 0.32;
+        const ix = cx + planetR * Math.cos(up);
+        const iy = cy + planetR * Math.sin(up);
+        const glowR = 12 + 34 * fe2;
+        const ga = 0.55 * (1 - fe2);
         const g2 = ctx.createRadialGradient(ix, iy, 0, ix, iy, glowR);
         g2.addColorStop(0, `rgba(${COLOR_EMBER}, ${ga})`);
         g2.addColorStop(1, `rgba(${COLOR_EMBER}, 0)`);
@@ -865,6 +918,27 @@ export class Sky {
       }
     }
     return null;
+  }
+}
+
+// ラベルブロックの矩形。mode: 星に対するラベルの逃げ方向
+function blockRect(
+  x: number,
+  y: number,
+  dotR: number,
+  w: number,
+  h: number,
+  layout: { mode: LayoutMode; dx: number },
+): Bounds {
+  switch (layout.mode) {
+    case 'below':
+      return { l: x + layout.dx - w / 2, t: y + dotR + 4, r: x + layout.dx + w / 2, b: y + dotR + 4 + h };
+    case 'above':
+      return { l: x + layout.dx - w / 2, t: y - dotR - 4 - h, r: x + layout.dx + w / 2, b: y - dotR - 4 };
+    case 'right':
+      return { l: x + dotR + 7, t: y - h / 2, r: x + dotR + 7 + w, b: y + h / 2 };
+    case 'left':
+      return { l: x - dotR - 7 - w, t: y - h / 2, r: x - dotR - 7, b: y + h / 2 };
   }
 }
 

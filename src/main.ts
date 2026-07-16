@@ -649,6 +649,13 @@ document.addEventListener('keydown', (e) => {
     openSearch();
     return;
   }
+  // Enterでも入力欄が開く
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (!writerMode) openWriter(inferWriteMode());
+    elWriterInput.focus();
+    return;
+  }
   // 打ち始める=書く。IMEの最初のキー(Process)も拾う
   if ((e.key.length === 1 && e.key !== ' ') || e.key === 'Process') {
     if (!writerMode) openWriter(inferWriteMode());
