@@ -2,8 +2,9 @@ import './style.css';
 import { PARAMS as P } from './params';
 import type { Grain, State, Theme } from './types';
 import { loadState, saveState, exportJson, parseImportedJson } from './store';
-import { cull, displayedGrains, effectiveAge, isOpenQuestion, tierOf, touch } from './ecosystem';
+import { cull, isOpenQuestion, touch } from './ecosystem';
 import { buildSampleState } from './sample';
+import { Sky } from './sky';
 
 // ---------- 状態 ----------
 let state: State = loadState();
@@ -11,10 +12,13 @@ let eco = state.ecoSeconds;
 let selection: string[] = [];
 let currentView: 'now' | 'theme' | 'search' = 'now';
 let openThemeId: string | null = null;
+let sky: Sky;
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
 const elField = $('#field');
+const elSkyCanvas = $<HTMLCanvasElement>('#sky-canvas');
+const elEmptyHint = $('#empty-hint');
 const elThread = $('#thread');
 const elThreadList = $('#thread-list');
 const elThreadTitle = $('#thread-title');
@@ -61,7 +65,17 @@ document.addEventListener('visibilitychange', () => {
 function commit(): void {
   cull(state, eco);
   saveState(state);
+  sky.onSelectionChanged(selection);
   render();
+}
+
+// 選択の一元管理。選択=参照系の乗り移り(選んだ粒が静止し、残りが流れる)
+function setSelection(ids: string[]): void {
+  selection = ids;
+  sky.onSelectionChanged(ids);
+  renderNow();
+  renderToolbar();
+  renderLauncherPlaceholder();
 }
 
 function newGrain(text: string, opts: { parents?: string[]; attachedTo?: string | null; themeId?: string | null } = {}): Grain {
@@ -217,142 +231,25 @@ function render(): void {
   renderLauncherPlaceholder();
 }
 
-// 今の面: 角度=接触順、半径=冷え具合の放射配置。静止。枠なし
+// 今の面: 粒と惑星はSky(canvas)が毎フレーム描く。ここではDOMオーバーレイだけ更新する
 function renderNow(): void {
-  elField.innerHTML = '';
-  const w = elField.clientWidth;
-  const h = elField.clientHeight;
-  const cx = w / 2;
-  const cy = h / 2;
-  const short = Math.min(w, h);
+  elEmptyHint.hidden = state.grains.length !== 0;
+  renderStructurePanel(0);
+}
 
-  // 惑星: 閉幕した粒の堆積で静かに育つ(数値は出さない・祝わない)
-  const closedCount = state.grains.filter((g) => g.status === 'closed').length;
-  const planetSize = Math.min(short * 0.2, 44 + Math.sqrt(closedCount) * 8);
-  const planet = document.createElement('div');
-  planet.id = 'planet';
-  planet.style.width = `${planetSize}px`;
-  planet.style.height = `${planetSize}px`;
-  elField.appendChild(planet);
-
-  // 最内周は惑星の縁より外に
-  const rMin = Math.max(short * P.RADIUS_MIN_RATIO, planetSize / 2 + 36);
-  const rMax = short * P.RADIUS_MAX_RATIO;
-
-  const grains = displayedGrains(state, eco).sort((a, b) => b.lastTouchEco - a.lastTouchEco);
-  const n = grains.length;
-
-  // まっさらな状態: サンプル読み込みの案内だけ静かに置く
-  if (state.grains.length === 0) {
-    const hint = document.createElement('div');
-    hint.textContent = '例のデータで始める';
-    hint.style.cssText =
-      'position:absolute;left:50%;top:62%;transform:translate(-50%,-50%);color:#3a4152;font-size:13px;cursor:pointer;';
-    hint.addEventListener('mouseenter', () => (hint.style.color = '#6b7280'));
-    hint.addEventListener('mouseleave', () => (hint.style.color = '#3a4152'));
-    hint.addEventListener('click', () => loadSample(false));
-    elField.appendChild(hint);
+// 構造パネルの位置はSkyの投影座標から決める(選択中の粒は参照系で静止している)
+function renderStructurePanel(attempt: number): void {
+  elField.querySelector('.structure')?.remove();
+  if (currentView !== 'now' || selection.length !== 1) return;
+  const g = grainById(selection[0]);
+  if (!g) return;
+  const pos = sky.project(g.id);
+  if (!pos) {
+    // まだ描かれていない(次フレーム待ち)。数回だけ再試行
+    if (attempt < 5) setTimeout(() => renderStructurePanel(attempt + 1), 100);
     return;
   }
-
-  const grainEls = new Map<string, { el: HTMLElement; x: number; y: number }>();
-
-  grains.forEach((g, i) => {
-    const effAge = effectiveAge(g, eco);
-    const tier = tierOf(effAge);
-    const frac = Math.min(1, effAge / P.SINK_AGE_SECONDS);
-    const r = rMin + Math.pow(frac, 0.6) * (rMax - rMin);
-    const angle = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(n, 1);
-
-    const div = document.createElement('div');
-    div.className = 'grain';
-    if (isOpenQuestion(g)) div.classList.add('question');
-    if (selection.includes(g.id)) div.classList.add('selected');
-    div.style.left = `${cx + r * Math.cos(angle)}px`;
-    div.style.top = `${cy + r * Math.sin(angle)}px`;
-    div.style.fontSize = `${tier.fontSizePx}px`;
-    div.style.opacity = String(tier.opacity);
-    div.title = g.text;
-
-    if (g.themeId) {
-      const theme = themeById(g.themeId);
-      if (theme) {
-        const name = document.createElement('span');
-        name.className = 'theme-name';
-        name.textContent = theme.name;
-        name.addEventListener('click', (e) => {
-          e.stopPropagation();
-          openTheme(theme.id);
-        });
-        div.appendChild(name);
-      }
-    }
-
-    const textSpan = document.createElement('span');
-    textSpan.textContent = clip(g.text, P.NOW_TEXT_CLIP);
-    div.appendChild(textSpan);
-
-    // 選択は接触に数えない（閲覧・選択は代謝ゼロ）
-    div.addEventListener('click', (e) => {
-      if (e.ctrlKey || e.metaKey) {
-        selection = selection.includes(g.id) ? selection.filter((id) => id !== g.id) : [...selection, g.id];
-      } else {
-        selection = selection.includes(g.id) && selection.length === 1 ? [] : [g.id];
-      }
-      renderNow();
-      renderToolbar();
-      renderLauncherPlaceholder();
-    });
-    div.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      correctText(g.id);
-    });
-
-    elField.appendChild(div);
-    grainEls.set(g.id, { el: div, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
-  });
-
-  resolveOverlaps([...grainEls.values()].map((v) => v.el));
-
-  // 構造は召喚されるもの: 選択中の粒の幹(親)と付箋だけを、その粒のそばに浮かべる
-  if (selection.length === 1) {
-    const g = grainById(selection[0]);
-    const pos = g && grainEls.get(g.id);
-    if (g && pos) renderStructure(g, pos.x, pos.y, w);
-  }
-}
-
-// 重なった粒は冷たい側(後に描画された側)のフォントを段階的に縮める
-function resolveOverlaps(els: HTMLElement[]): void {
-  const GAP = 4;
-  for (let pass = 0; pass < 6; pass++) {
-    let collided = false;
-    const rects = els.map((el) => el.getBoundingClientRect());
-    for (let i = 0; i < els.length; i++) {
-      for (let j = i + 1; j < els.length; j++) {
-        const a = rects[i];
-        const b = rects[j];
-        const overlap =
-          a.left < b.right + GAP && b.left < a.right + GAP && a.top < b.bottom + GAP && b.top < a.bottom + GAP;
-        if (!overlap) continue;
-        // els は熱い順に並んでいるので j 側(冷たい側)を縮める。下限に達したら i 側も縮める
-        const target = shrinkFont(els[j]) ? els[j] : shrinkFont(els[i]) ? els[i] : null;
-        if (target) {
-          collided = true;
-          rects[els.indexOf(target)] = target.getBoundingClientRect();
-        }
-      }
-    }
-    if (!collided) break;
-  }
-}
-
-function shrinkFont(el: HTMLElement): boolean {
-  const cur = parseFloat(el.style.fontSize || '14');
-  const next = Math.max(P.OVERLAP_MIN_FONT_PX, cur * P.OVERLAP_SHRINK_FACTOR);
-  if (next >= cur) return false;
-  el.style.fontSize = `${next}px`;
-  return true;
+  renderStructure(g, pos.x, pos.y + pos.h / 2, elField.clientWidth);
 }
 
 // 選択中の粒の幹と付箋(保存された事実のみ)を小さく浮かべる
@@ -364,7 +261,7 @@ function renderStructure(g: Grain, x: number, y: number, fieldWidth: number): vo
   const panel = document.createElement('div');
   panel.className = 'structure';
   panel.style.left = `${Math.min(Math.max(x - 120, 8), fieldWidth - 248)}px`;
-  panel.style.top = `${y + 26}px`;
+  panel.style.top = `${y + 12}px`;
 
   const addSection = (label: string, items: Grain[]) => {
     if (items.length === 0) return;
@@ -383,10 +280,7 @@ function renderStructure(g: Grain, x: number, y: number, fieldWidth: number): vo
         // 幹をたどる移動。選択は接触に数えない
         row.addEventListener('click', (e) => {
           e.stopPropagation();
-          selection = [item.id];
-          renderNow();
-          renderToolbar();
-          renderLauncherPlaceholder();
+          setSelection([item.id]);
         });
       }
       panel.appendChild(row);
@@ -620,22 +514,13 @@ function renderLauncherPlaceholder(): void {
 // Escで選択解除 / Deleteで閉幕（入力中は無効）
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && selection.length > 0) {
-    selection = [];
-    render();
+    setSelection([]);
     return;
   }
   const a = document.activeElement;
   const typing = a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement;
   if (e.key === 'Delete' && !typing && currentView === 'now' && selection.length > 0) {
     closeGrains([...selection]);
-  }
-});
-
-// 背景クリックで選択解除
-elField.addEventListener('click', (e) => {
-  if (e.target === elField && selection.length > 0) {
-    selection = [];
-    render();
   }
 });
 
@@ -651,6 +536,7 @@ function loadSample(needConfirm: boolean): void {
   state = buildSampleState();
   eco = state.ecoSeconds;
   selection = [];
+  sky.onSelectionChanged([]);
   cull(state, eco);
   saveState(state);
   showView('now');
@@ -677,6 +563,7 @@ $<HTMLInputElement>('#btn-import').addEventListener('change', async (e) => {
   state = imported;
   eco = state.ecoSeconds;
   selection = [];
+  sky.onSelectionChanged([]);
   cull(state, eco);
   saveState(state);
   render();
@@ -694,6 +581,16 @@ function fmtDate(ms: number): string {
 }
 
 // ---------- 起動 ----------
+sky = new Sky(elSkyCanvas, {
+  getState: () => state,
+  getEco: () => eco,
+  getSelection: () => selection,
+  setSelection,
+  openTheme,
+  correct: correctText,
+  isActive: () => currentView === 'now',
+});
+elEmptyHint.addEventListener('click', () => loadSample(false));
 cull(state, eco); // 前回終了後の状態でも規律を守らせてから描画
 saveState(state);
 showView('now');

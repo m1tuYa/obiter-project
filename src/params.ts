@@ -38,4 +38,13 @@ export const PARAMS = {
   // 放射配置の内側/外側の半径（画面短辺に対する比率）
   RADIUS_MIN_RATIO: 0.12,
   RADIUS_MAX_RATIO: 0.46,
+
+  // ---------- 周回(運動は情報であって演出ではない) ----------
+  // 最も熱い粒の公転周期(滞在秒)。冷えた粒はこの ORBIT_COLD_FACTOR 倍まで遅くなる
+  ORBIT_PERIOD_HOT_SECONDS: 480,
+  ORBIT_COLD_FACTOR: 0.35,
+
+  // ズームの範囲。最小=全天(点と塊の星空)、最大=地表寄り(全文で読む)
+  ZOOM_MIN: 0.35,
+  ZOOM_MAX: 2.5,
 };
