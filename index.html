@@ -6,38 +6,57 @@
     <title>orbiter</title>
   </head>
   <body>
-    <div id="topbar">
-      <button id="nav-now" class="nav active">今</button>
-      <button id="nav-search" class="nav">検索</button>
-      <span class="spacer"></span>
-      <button id="btn-sample" class="ghost">例</button>
-      <button id="btn-export" class="ghost">書き出し</button>
-      <label class="ghost" id="btn-import-label">読み込み<input type="file" id="btn-import" accept=".json" hidden /></label>
-    </div>
-
     <div id="field">
       <canvas id="sky-canvas"></canvas>
-      <div id="empty-hint" hidden>例のデータで始める</div>
-    </div>
-
-    <div id="thread" hidden>
-      <div id="thread-header">
-        <button id="thread-back" class="ghost">← 今へ</button>
-        <span id="thread-title"></span>
+      <div id="empty-hint" hidden>
+        <div class="hint-line">そのまま打ち始めれば、粒になる</div>
+        <div class="hint-link" id="sample-link">例のデータで始める</div>
       </div>
-      <div id="thread-list"></div>
     </div>
 
-    <div id="search" hidden>
-      <input id="search-input" type="text" placeholder="全文検索（生死を問わず）" autocomplete="off" />
-      <div id="search-results"></div>
-    </div>
+    <!-- 選択中の操作(召喚されるグリフ) -->
+    <div id="actions" hidden></div>
 
-    <div id="toolbar" hidden></div>
-
-    <form id="launcher" autocomplete="off">
-      <input id="launch-input" type="text" placeholder="打ち上げ（Enter）" />
+    <!-- 書く行(打ち始めると浮かび上がる) -->
+    <form id="writer" hidden autocomplete="off">
+      <div id="writer-context"></div>
+      <input id="writer-input" type="text" autocomplete="off" />
     </form>
+
+    <!-- 検索(/で召喚) -->
+    <div id="search-overlay" hidden>
+      <div id="search-box">
+        <input id="search-input" type="text" placeholder="全文検索 — 生死を問わず" autocomplete="off" />
+        <div id="search-results"></div>
+      </div>
+    </div>
+
+    <!-- テーマの尾(右から滑り込む帯) -->
+    <div id="band" hidden>
+      <div id="band-header">
+        <span id="band-title"></span>
+        <span id="band-close">esc</span>
+      </div>
+      <div id="band-list"></div>
+    </div>
+
+    <!-- 右上の格納庫 -->
+    <div id="corner">
+      <div id="corner-toggle">···</div>
+      <div id="corner-menu" hidden>
+        <div class="corner-item" id="menu-sample">例のデータ</div>
+        <div class="corner-item" id="menu-export">書き出し</div>
+        <label class="corner-item" for="menu-import">読み込み<input type="file" id="menu-import" accept=".json" hidden /></label>
+        <div id="corner-keys">
+          <div>打ち始める = 書く</div>
+          <div>/ = 検索</div>
+          <div>クリック = 粒に乗る</div>
+          <div>ドラッグ = 空を回す</div>
+          <div>惑星へ落とす / Delete = 閉幕</div>
+          <div>ホイール = ズーム</div>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
