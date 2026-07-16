@@ -219,13 +219,24 @@ function render(): void {
 
 // 今の面: 角度=接触順、半径=冷え具合の放射配置。静止。枠なし
 function renderNow(): void {
-  elField.innerHTML = '<div id="center-dot"></div>';
+  elField.innerHTML = '';
   const w = elField.clientWidth;
   const h = elField.clientHeight;
   const cx = w / 2;
   const cy = h / 2;
   const short = Math.min(w, h);
-  const rMin = short * P.RADIUS_MIN_RATIO;
+
+  // 惑星: 閉幕した粒の堆積で静かに育つ(数値は出さない・祝わない)
+  const closedCount = state.grains.filter((g) => g.status === 'closed').length;
+  const planetSize = Math.min(short * 0.2, 44 + Math.sqrt(closedCount) * 8);
+  const planet = document.createElement('div');
+  planet.id = 'planet';
+  planet.style.width = `${planetSize}px`;
+  planet.style.height = `${planetSize}px`;
+  elField.appendChild(planet);
+
+  // 最内周は惑星の縁より外に
+  const rMin = Math.max(short * P.RADIUS_MIN_RATIO, planetSize / 2 + 36);
   const rMax = short * P.RADIUS_MAX_RATIO;
 
   const grains = displayedGrains(state, eco).sort((a, b) => b.lastTouchEco - a.lastTouchEco);
@@ -236,7 +247,7 @@ function renderNow(): void {
     const hint = document.createElement('div');
     hint.textContent = '例のデータで始める';
     hint.style.cssText =
-      'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:#3a4152;font-size:13px;cursor:pointer;';
+      'position:absolute;left:50%;top:62%;transform:translate(-50%,-50%);color:#3a4152;font-size:13px;cursor:pointer;';
     hint.addEventListener('mouseenter', () => (hint.style.color = '#6b7280'));
     hint.addEventListener('mouseleave', () => (hint.style.color = '#3a4152'));
     hint.addEventListener('click', () => loadSample(false));
