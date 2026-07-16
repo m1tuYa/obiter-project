@@ -231,65 +231,9 @@ function render(): void {
   renderLauncherPlaceholder();
 }
 
-// 今の面: 粒と惑星はSky(canvas)が毎フレーム描く。ここではDOMオーバーレイだけ更新する
+// 今の面: 粒・惑星・星座はSky(canvas)が毎フレーム描く。ここでは空状態の案内だけ更新する
 function renderNow(): void {
   elEmptyHint.hidden = state.grains.length !== 0;
-  renderStructurePanel(0);
-}
-
-// 構造パネルの位置はSkyの投影座標から決める(選択中の粒は参照系で静止している)
-function renderStructurePanel(attempt: number): void {
-  elField.querySelector('.structure')?.remove();
-  if (currentView !== 'now' || selection.length !== 1) return;
-  const g = grainById(selection[0]);
-  if (!g) return;
-  const pos = sky.project(g.id);
-  if (!pos) {
-    // まだ描かれていない(次フレーム待ち)。数回だけ再試行
-    if (attempt < 5) setTimeout(() => renderStructurePanel(attempt + 1), 100);
-    return;
-  }
-  renderStructure(g, pos.x, pos.y + pos.h / 2, elField.clientWidth);
-}
-
-// 選択中の粒の幹と付箋(保存された事実のみ)を小さく浮かべる
-function renderStructure(g: Grain, x: number, y: number, fieldWidth: number): void {
-  const parents = g.parentIds.map((id) => grainById(id)).filter((p): p is Grain => !!p);
-  const stickers = state.grains.filter((s) => s.attachedToId === g.id);
-  if (parents.length === 0 && stickers.length === 0) return;
-
-  const panel = document.createElement('div');
-  panel.className = 'structure';
-  panel.style.left = `${Math.min(Math.max(x - 120, 8), fieldWidth - 248)}px`;
-  panel.style.top = `${y + 12}px`;
-
-  const addSection = (label: string, items: Grain[]) => {
-    if (items.length === 0) return;
-    const lab = document.createElement('div');
-    lab.className = 's-label';
-    lab.textContent = label;
-    panel.appendChild(lab);
-    for (const item of items) {
-      const row = document.createElement('div');
-      row.className = 's-item';
-      if (item.status !== 'alive') row.classList.add('dead');
-      if (isOpenQuestion(item)) row.classList.add('question');
-      row.textContent =
-        clip(item.text, 36) + (item.status === 'drifted' ? ' ・漂流' : item.status === 'closed' ? ' ・閉幕' : '');
-      if (item.status === 'alive') {
-        // 幹をたどる移動。選択は接触に数えない
-        row.addEventListener('click', (e) => {
-          e.stopPropagation();
-          setSelection([item.id]);
-        });
-      }
-      panel.appendChild(row);
-    }
-  };
-
-  addSection('幹', parents);
-  addSection('付箋', stickers);
-  elField.appendChild(panel);
 }
 
 // テーマの尾: 系譜順の一本の読み物。先端が最初に見える
@@ -588,6 +532,7 @@ sky = new Sky(elSkyCanvas, {
   setSelection,
   openTheme,
   correct: correctText,
+  closeGrain: (id: string) => closeGrains([id]),
   isActive: () => currentView === 'now',
 });
 elEmptyHint.addEventListener('click', () => loadSample(false));
