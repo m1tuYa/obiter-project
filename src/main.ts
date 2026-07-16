@@ -2,7 +2,7 @@ import './style.css';
 import { PARAMS as P } from './params';
 import type { Grain, State, Theme } from './types';
 import { loadState, saveState, exportJson, parseImportedJson } from './store';
-import { cull, ensureAngles, hashAngle, isOpenQuestion, touch } from './ecosystem';
+import { cull, ensureAngles, hashAngle, isAwayComet, isOpenQuestion, touch } from './ecosystem';
 import { buildSampleState } from './sample';
 import { Sky } from './sky';
 
@@ -22,9 +22,10 @@ let eco = state.ecoSeconds;
 let selection: string[] = [];
 let sky: Sky;
 
-type WriterMode = 'launch' | 'child' | 'sticker' | 'merge' | 'append' | 'theme-name' | 'correct';
+type WriterMode = 'launch' | 'child' | 'sticker' | 'merge' | 'append' | 'theme-name' | 'correct' | 'comet';
 let writerMode: WriterMode | null = null;
 let correctTargetId: string | null = null;
+let cometTargetId: string | null = null;
 let bandThemeId: string | null = null;
 let searchOpen = false;
 
@@ -54,7 +55,8 @@ setInterval(() => {
   tickCount++;
   eco += P.DEBUG_TIME_SCALE;
   state.ecoSeconds = eco;
-  if (tickCount % 5 === 0 && cull(state, eco)) render();
+  if (checkCometReturns()) render();
+  if (tickCount % 5 === 0 && cull(state, eco, Date.now())) render();
   if (tickCount % 15 === 0) saveState(state);
 }, 1000);
 
@@ -72,7 +74,7 @@ document.addEventListener('visibilitychange', () => {
 
 // ---------- 変異の共通処理 ----------
 function commit(): void {
-  cull(state, eco);
+  cull(state, eco, Date.now());
   saveState(state);
   sky.onSelectionChanged(selection);
   render();
@@ -156,6 +158,116 @@ function precipitate(grainId: string, name: string): void {
   commit();
 }
 
+// ---------- 彗星 ----------
+
+// 帰還時刻が来た彗星を空へ戻す(壁時計で判定する唯一の存在)
+function checkCometReturns(): boolean {
+  const now = Date.now();
+  let changed = false;
+  for (const g of state.grains) {
+    if (g.status === 'alive' && g.cometReturnAtWall != null && now >= g.cometReturnAtWall) {
+      returnComet(g);
+      changed = true;
+    }
+  }
+  if (changed) saveState(state);
+  return changed;
+}
+
+function returnComet(g: Grain): void {
+  g.cometLastReturnAtWall = g.cometReturnAtWall ?? Date.now();
+  g.cometReturnAtWall = null;
+  g.cometTail = true;
+  g.lastTouchEco = eco; // 近日点=熱い。以後は死の一法則に合流する
+  sky.noteReturn(g.id);
+}
+
+// 彗星として打ち出す: 帰還日(と任意の周期)を与え、空から去らせる
+function sendComet(grainId: string, returnAt: number, periodDays: number | null): void {
+  const g = grainById(grainId);
+  if (!g || g.status !== 'alive') return;
+  sky.noteDeparture(grainId);
+  g.cometReturnAtWall = returnAt;
+  g.cometPeriodDays = periodDays;
+  g.cometLastReturnAtWall = null;
+  g.cometTail = false;
+  selection = selection.filter((id) => id !== grainId);
+  sky.onSelectionChanged(selection);
+  commit();
+}
+
+// 呼び戻す: 帰還日を待たずに今戻す
+function recallComet(grainId: string): void {
+  const g = grainById(grainId);
+  if (!g || g.cometReturnAtWall == null) return;
+  returnComet(g);
+  commit();
+}
+
+// 軌道を消す: 彗星であることをやめる(視界外なら今すぐ戻す)
+function clearOrbit(grainId: string): void {
+  const g = grainById(grainId);
+  if (!g) return;
+  const wasAway = g.cometReturnAtWall != null;
+  g.cometReturnAtWall = null;
+  g.cometPeriodDays = null;
+  g.cometLastReturnAtWall = null;
+  g.cometTail = false;
+  if (wasAway) {
+    g.lastTouchEco = eco;
+    sky.noteReturn(grainId);
+  }
+  commit();
+}
+
+// 日付の軽い記法を解釈する。例: 7/20 / 7/20 14:00 / +3日 / 明日 / 金曜 / 毎週金曜 / 毎3日
+function parseCometInput(raw: string): { at: number; period: number | null } | null {
+  let s = raw.trim().replace(/\s+/g, ' ');
+  if (!s) return null;
+  let period: number | null = null;
+
+  const mai = s.match(/^毎(日|週|月|(\d+)日)\s*(.*)$/);
+  if (mai) {
+    period = mai[1] === '日' ? 1 : mai[1] === '週' ? 7 : mai[1] === '月' ? 30 : parseInt(mai[2], 10);
+    s = (mai[3] ?? '').trim();
+  }
+
+  const now = new Date();
+  const at9 = (d: Date): Date => {
+    d.setHours(9, 0, 0, 0);
+    return d;
+  };
+  let at: number | null = null;
+
+  if (!s) {
+    if (period == null) return null;
+    at = at9(new Date(now.getTime() + period * 86400000)).getTime();
+  } else {
+    let m: RegExpMatchArray | null;
+    if ((m = s.match(/^\+(\d+)(d|日)$/))) {
+      at = now.getTime() + parseInt(m[1], 10) * 86400000;
+    } else if (s === '明日') {
+      at = at9(new Date(now.getTime() + 86400000)).getTime();
+    } else if (s === '明後日') {
+      at = at9(new Date(now.getTime() + 2 * 86400000)).getTime();
+    } else if ((m = s.match(/^(日|月|火|水|木|金|土)(曜日?)?$/))) {
+      const target = '日月火水木金土'.indexOf(m[1]);
+      let ahead = (target - now.getDay() + 7) % 7;
+      if (ahead === 0) ahead = 7;
+      at = at9(new Date(now.getTime() + ahead * 86400000)).getTime();
+    } else if ((m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?$/))) {
+      const d = new Date(now.getFullYear(), parseInt(m[1], 10) - 1, parseInt(m[2], 10));
+      if (m[3]) d.setHours(parseInt(m[3], 10), parseInt(m[4], 10), 0, 0);
+      else at9(d);
+      if (d.getTime() <= now.getTime()) d.setFullYear(d.getFullYear() + 1);
+      at = d.getTime();
+    }
+  }
+
+  if (at == null || at <= Date.now()) return null;
+  return { at, period };
+}
+
 // 細い幹を張る: 星を星に落とすと子としてリンクし、そのそばへ移る。
 // 幹(parentIds)は不変なので、後から張る参照は linkIds に持つ。時計は巻き戻さない
 function linkGrains(childId: string, targetId: string): void {
@@ -209,7 +321,11 @@ function themeTip(themeId: string): Grain | undefined {
 
 function inferWriteMode(): WriterMode {
   if (selection.length > 1) return 'merge';
-  if (selection.length === 1) return 'child';
+  if (selection.length === 1) {
+    const g = grainById(selection[0]);
+    if (g && isAwayComet(g)) return 'launch'; // 軌道上の彗星には書き足さない
+    return 'child';
+  }
   if (bandThemeId) return 'append';
   return 'launch';
 }
@@ -224,6 +340,7 @@ function openWriter(mode: WriterMode): void {
 function closeWriter(): void {
   writerMode = null;
   correctTargetId = null;
+  cometTargetId = null;
   elWriterInput.value = '';
   elWriter.hidden = true;
 }
@@ -258,6 +375,9 @@ function updateWriterContext(): void {
       break;
     case 'correct':
       text = '訂正 — 時計は動かない';
+      break;
+    case 'comet':
+      text = '彗星 — いつ戻すか(例: 7/20、+3日、金曜、毎週金曜、毎3日)';
       break;
   }
   elWriterContext.textContent = text;
@@ -346,6 +466,16 @@ elWriter.addEventListener('submit', (e) => {
       closeWriter();
       break;
     }
+    case 'comet': {
+      const parsed = parseCometInput(text);
+      if (!parsed) {
+        elWriterContext.textContent = '読めない日付です。例: 7/20、7/20 14:00、+3日、金曜、毎週金曜';
+        return;
+      }
+      if (cometTargetId) sendComet(cometTargetId, parsed.at, parsed.period);
+      closeWriter();
+      break;
+    }
   }
 });
 
@@ -391,6 +521,16 @@ function renderGlyphs(): void {
       elActions.hidden = true;
       return;
     }
+    if (isAwayComet(g)) {
+      // 軌道上の彗星: 遠くにいる粒への操作は最小限
+      glyph('呼び戻す', '', () => recallComet(g.id));
+      sep();
+      glyph('軌道を消す', '', () => clearOrbit(g.id));
+      sep();
+      glyph('閉幕', 'close', () => closeGrains([g.id]));
+      elActions.appendChild(document.createElement('span'));
+      return;
+    }
     glyph('付箋', '', () => openWriter('sticker'));
     sep();
     glyph('閉幕', 'close', () => closeGrains([g.id]));
@@ -402,7 +542,16 @@ function renderGlyphs(): void {
       glyph(t ? `尾 — ${t.name}` : '尾', '', () => g.themeId && openBand(g.themeId));
     }
     sep();
+    glyph('彗星', '', () => {
+      cometTargetId = g.id;
+      openWriter('comet');
+    });
+    sep();
     glyph('訂正', '', () => beginCorrect(g.id));
+    if (g.cometPeriodDays) {
+      sep();
+      glyph('軌道を消す', '', () => clearOrbit(g.id));
+    }
   } else {
     const note = document.createElement('span');
     note.className = 'note';
@@ -570,6 +719,17 @@ function renderSearch(): void {
       note.textContent = `蘇生: ${g.revivedNote}`;
       meta.appendChild(note);
     }
+    if (g.cometReturnAtWall != null) {
+      const note = document.createElement('span');
+      note.className = 'r-note';
+      note.textContent = `彗星 ・帰還 ${fmtDate(g.cometReturnAtWall)}${g.cometPeriodDays ? ` ・毎${g.cometPeriodDays}日` : ''}`;
+      meta.appendChild(note);
+    } else if (g.cometPeriodDays) {
+      const note = document.createElement('span');
+      note.className = 'r-note';
+      note.textContent = `周期彗星 ・毎${g.cometPeriodDays}日`;
+      meta.appendChild(note);
+    }
     div.appendChild(meta);
 
     if (g.status !== 'alive') {
@@ -706,7 +866,8 @@ $<HTMLInputElement>('#menu-import').addEventListener('change', async (e) => {
   closeBand();
   closeSearch();
   sky.onSelectionChanged([]);
-  cull(state, eco);
+  checkCometReturns();
+  cull(state, eco, Date.now());
   saveState(state);
   render();
   (e.target as HTMLInputElement).value = '';
@@ -724,7 +885,8 @@ function loadSample(needConfirm: boolean): void {
   closeBand();
   closeSearch();
   sky.onSelectionChanged([]);
-  cull(state, eco);
+  checkCometReturns();
+  cull(state, eco, Date.now());
   saveState(state);
   render();
 }
@@ -765,6 +927,7 @@ sky = new Sky($<HTMLCanvasElement>('#sky-canvas'), {
   repositionGrain,
   isActive: () => true,
 });
-cull(state, eco); // 前回終了後の状態でも規律を守らせてから描画
+checkCometReturns(); // 不在中に帰還日を迎えた彗星を戻す
+cull(state, eco, Date.now()); // 前回終了後の状態でも規律を守らせてから描画
 saveState(state);
 render();

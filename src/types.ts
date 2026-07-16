@@ -13,7 +13,10 @@ export interface Grain {
   linkIds?: string[];         // 細い幹。ドラッグで後から張る弱い参照
   attachedToId?: string | null; // 付箋の場合、貼り付き先の粒
   themeId?: string | null;    // 析出済みならテーマID
-  cometReturnAtWall?: number | null; // 彗星: 帰還予定日（第一段では未使用）
+  cometReturnAtWall?: number | null;     // 彗星: 次の帰還時刻(壁時計)。非nullの間は軌道上=視界外・凍結
+  cometPeriodDays?: number | null;       // 周期彗星: 公転周期(日)。冷え切ると漂流の代わりに再出発する
+  cometLastReturnAtWall?: number | null; // 直近の帰還時刻。次の帰還の基準(周期の錨)
+  cometTail?: boolean;                   // 帰還後まだ触られていない印。触ると尾が消える(捕獲)
   angle?: number;             // 空での固有の角度(ラジアン)。誕生時に決まり、ドラッグでのみ動く
 }
 

@@ -92,6 +92,8 @@ export class Sky {
 
   private launchFx = new Map<string, number>();
   private entryFx: { angle0: number; r0: number; start: number }[] = [];
+  private returnFx = new Map<string, number>(); // 彗星の帰還(外縁から滑り込む)
+  private departFx: { angle0: number; r0: number; start: number }[] = []; // 彗星の出発(外へ遠ざかる)
 
   private pointerMode: 'none' | 'dial' | 'grain' = 'none';
   private dragMoved = false;
@@ -143,6 +145,20 @@ export class Sky {
     const angle0 = Math.atan2(pos.y - this.lastCenterY, pos.x - this.lastCenterX);
     const r0 = Math.hypot(pos.x - this.lastCenterX, pos.y - this.lastCenterY);
     this.entryFx.push({ angle0, r0, start: this.animT });
+  }
+
+  // 彗星の帰還: 外縁から尾を引いて滑り込む
+  noteReturn(grainId: string): void {
+    this.returnFx.set(grainId, this.animT);
+  }
+
+  // 彗星の出発: 現在位置から外へ遠ざかる
+  noteDeparture(grainId: string): void {
+    const pos = this.project(grainId);
+    if (!pos) return;
+    const angle0 = Math.atan2(pos.y - this.lastCenterY, pos.x - this.lastCenterX);
+    const r0 = Math.hypot(pos.x - this.lastCenterX, pos.y - this.lastCenterY);
+    this.departFx.push({ angle0, r0, start: this.animT });
   }
 
   // ---------- 力学 ----------
@@ -282,6 +298,18 @@ export class Sky {
           launching = Math.max(0, e);
           angle = lerpAngle(prevUp, angle, easeInOut(launching));
           r = planetR + 4 + (r - planetR - 4) * easeOutCubic(launching);
+        }
+      }
+
+      // 彗星の帰還: 外縁から弧を描いて自分の軌道へ滑り込む
+      const retStart = this.returnFx.get(g.id);
+      if (retStart !== undefined) {
+        const e = (this.animT - retStart) / 1.6;
+        if (e >= 1) this.returnFx.delete(g.id);
+        else {
+          launching = Math.min(launching, Math.max(0.15, e));
+          angle = lerpAngle(angle + 0.5, angle, easeInOut(Math.max(0, e)));
+          r = rMax + 90 + (r - rMax - 90) * easeOutCubic(Math.max(0, e));
         }
       }
 
@@ -592,6 +620,23 @@ export class Sky {
       ctx.fill();
       ctx.shadowBlur = 0;
 
+      // 帰還してまだ触られていない彗星は尾を引く(触れば捕獲=尾が消える)
+      if (p.g.cometTail) {
+        const dLen = Math.max(1, Math.hypot(p.x - cx, p.y - cy));
+        const ox = (p.x - cx) / dLen;
+        const oy = (p.y - cy) / dLen;
+        const tail = 18 + p.dotR * 2;
+        const tg = ctx.createLinearGradient(p.x, p.y, p.x + ox * tail, p.y + oy * tail);
+        tg.addColorStop(0, `rgba(${COLOR_FG}, 0.55)`);
+        tg.addColorStop(1, `rgba(${COLOR_FG}, 0)`);
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x + ox * tail, p.y + oy * tail);
+        ctx.strokeStyle = tg;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+
       let themeRect: DrawnItem['themeRect'];
 
       if (p.textOnly) {
@@ -635,6 +680,58 @@ export class Sky {
       }
 
       this.drawn.push({ g: p.g, dotX: p.x, dotY: p.y, bounds: bounds!, themeRect });
+    }
+
+    // ---- 軌道上の彗星: 全天まで引いたときだけ、外縁の遠くに見える ----
+    const rimAlpha = smoothstep(0.72 - this.zoom, 0, 0.2);
+    if (rimAlpha > 0.01) {
+      const away = state.grains.filter((g) => g.status === 'alive' && g.cometReturnAtWall != null);
+      for (const g of away) {
+        const angle = (g.angle ?? 0) + this.animT * this.omega - refOffset + this.manualRot;
+        const rr = rMax + 36;
+        const px = cx + rr * Math.cos(angle);
+        const py = cy + rr * Math.sin(angle);
+        const selectedAway = selection.includes(g.id);
+
+        // 小さな氷の点と、外へ流れる微かな尾
+        const tail = 12;
+        const tg = ctx.createLinearGradient(px, py, px + Math.cos(angle) * tail, py + Math.sin(angle) * tail);
+        tg.addColorStop(0, `rgba(${COLOR_FG}, ${0.4 * rimAlpha})`);
+        tg.addColorStop(1, `rgba(${COLOR_FG}, 0)`);
+        ctx.beginPath();
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + Math.cos(angle) * tail, py + Math.sin(angle) * tail);
+        ctx.strokeStyle = tg;
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+        if (selectedAway) {
+          ctx.shadowColor = `rgba(${COLOR_FG}, 0.9)`;
+          ctx.shadowBlur = 10;
+        }
+        ctx.beginPath();
+        ctx.arc(px, py, 2.1, 0, 2 * Math.PI);
+        ctx.fillStyle = `rgba(${COLOR_FG}, ${(selectedAway ? 0.95 : 0.55) * rimAlpha})`;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        let bounds: Bounds = { l: px - 8, t: py - 8, r: px + 8, b: py + 8 };
+        if (selectedAway) {
+          ctx.font = `11px ${FONT_STACK}`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillStyle = `rgba(${COLOR_FG}, ${0.8 * rimAlpha})`;
+          const label = clipText(g.text, 20);
+          ctx.fillText(label, px, py + 7);
+          ctx.font = `9.5px ${FONT_STACK}`;
+          ctx.fillStyle = `rgba(${COLOR_ACCENT}, ${0.7 * rimAlpha})`;
+          const when = fmtWall(g.cometReturnAtWall!);
+          const periodText = g.cometPeriodDays ? ` ・毎${g.cometPeriodDays}日` : '';
+          ctx.fillText(`帰還 ${when}${periodText}`, px, py + 22);
+          const w = Math.max(ctx.measureText(label).width, 60);
+          bounds = { l: px - w / 2, t: py - 8, r: px + w / 2, b: py + 34 };
+        }
+        this.drawn.push({ g, dotX: px, dotY: py, bounds });
+      }
     }
 
     // ---- ドラッグ中: 落とし先の星にリング ----
@@ -694,6 +791,36 @@ export class Sky {
         ctx.fillStyle = g2;
         ctx.fill();
       }
+      return true;
+    });
+
+    // ---- 彗星の出発(外へ遠ざかり、見えなくなる) ----
+    this.departFx = this.departFx.filter((fx) => {
+      const e = (this.animT - fx.start) / 1.4;
+      if (e >= 1) return false;
+      const ang = fx.angle0 + 0.35 * easeInOut(e);
+      const rr = fx.r0 + (rMax + 140 - fx.r0) * (e * e);
+      const px = cx + rr * Math.cos(ang);
+      const py = cy + rr * Math.sin(ang);
+      const a = 0.7 * (1 - e);
+      // 惑星側へ流れる尾(遠ざかる背中)
+      const back = fx.angle0 + 0.35 * easeInOut(Math.max(0, e - 0.05));
+      const br = fx.r0 + (rMax + 140 - fx.r0) * Math.pow(Math.max(0, e - 0.05), 2);
+      const bx = cx + br * Math.cos(back);
+      const by = cy + br * Math.sin(back);
+      const tg = ctx.createLinearGradient(px, py, bx, by);
+      tg.addColorStop(0, `rgba(${COLOR_FG}, ${a})`);
+      tg.addColorStop(1, `rgba(${COLOR_FG}, 0)`);
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(bx, by);
+      ctx.strokeStyle = tg;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(px, py, 2.2, 0, 2 * Math.PI);
+      ctx.fillStyle = `rgba(${COLOR_FG}, ${a})`;
+      ctx.fill();
       return true;
     });
 
@@ -963,4 +1090,9 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number,
 
 function clipText(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+function fmtWall(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }

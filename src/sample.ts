@@ -24,6 +24,8 @@ export function buildSampleState(): State {
     closedAgoH?: number;
     closedNote?: string;
     revivedNote?: string;
+    cometInH?: number; // 彗星: 何時間後に帰還するか
+    periodDays?: number; // 周期彗星
   }): string => {
     const id = `smp-${++seq}`;
     grains.push({
@@ -36,7 +38,8 @@ export function buildSampleState(): State {
       linkIds: o.links,
       attachedToId: o.attachedTo ?? null,
       themeId: o.themeId ?? null,
-      cometReturnAtWall: null,
+      cometReturnAtWall: o.cometInH !== undefined ? now + o.cometInH * h : null,
+      cometPeriodDays: o.periodDays ?? null,
       angle: o.angle,
       closedAtWall: o.closedAgoH !== undefined ? now - o.closedAgoH * h : undefined,
       closedNote: o.closedNote,
@@ -89,6 +92,10 @@ export function buildSampleState(): State {
   add({ text: '?退屈は思考の材料か、それとも欠乏か', ageEco: 7800, wallAgeH: 90 });
   add({ text: '棚の写真を整理する', ageEco: 8800, wallAgeH: 100 });
   add({ text: '言い切る文体への憧れと恐れ', ageEco: 9900, wallAgeH: 110 });
+
+  // ---------- 彗星(軌道上。全天まで引くと外縁に見える) ----------
+  add({ text: '金曜の自分へ: 原稿の第二稿に着手する', ageEco: 400, wallAgeH: 8, cometInH: 40 });
+  add({ text: '週次の見返し。惑星を眺めて、ひとつだけ蘇生する', ageEco: 600, wallAgeH: 100, cometInH: 70, periodDays: 7 });
 
   // ---------- テーマ ----------
   const themes = [

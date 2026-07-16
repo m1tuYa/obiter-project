@@ -16,8 +16,15 @@ export function effectiveAge(g: Grain, eco: number): number {
 }
 
 // 時計の巻き戻し。呼んでよいのは: 付箋の追加 / 子の追加 / 蘇生 のみ。
+// 帰還中の彗星に触れたら捕獲(尾が消える)
 export function touch(g: Grain, eco: number): void {
   g.lastTouchEco = eco;
+  if (g.cometTail) g.cometTail = false;
+}
+
+// 軌道上(視界外)の彗星か
+export function isAwayComet(g: Grain): boolean {
+  return g.cometReturnAtWall != null;
 }
 
 // 「今」の面に表示される粒:
@@ -30,6 +37,7 @@ export function displayedGrains(state: State, eco: number): Grain[] {
   const repsAny = new Map<string, Grain>();
   for (const g of state.grains) {
     if (g.status !== 'alive') continue;
+    if (isAwayComet(g)) continue; // 軌道上の彗星は視界にいない(帯域も消費しない)
     if (!g.themeId) {
       out.push(g);
       continue;
@@ -48,14 +56,27 @@ export function displayedGrains(state: State, eco: number): Grain[] {
 }
 
 // 沈降。警告なし・無音。変更があれば true。
-export function cull(state: State, eco: number): boolean {
+// 周期彗星は冷え切ったとき、漂流する代わりに次の軌道へ再出発する(「無視すればまた遠ざかる」)
+export function cull(state: State, eco: number, wallNow: number): boolean {
   let changed = false;
 
-  // 1) 時間による沈降: 実効年齢が閾値を超えた生きた粒は漂流する
-  for (const g of state.grains) {
-    if (g.status === 'alive' && effectiveAge(g, eco) > P.SINK_AGE_SECONDS) {
+  const sink = (g: Grain): void => {
+    if (g.cometPeriodDays) {
+      const period = g.cometPeriodDays * 86400000;
+      let next = (g.cometLastReturnAtWall ?? wallNow) + period;
+      while (next <= wallNow) next += period;
+      g.cometReturnAtWall = next;
+      g.cometTail = false;
+    } else {
       g.status = 'drifted';
-      changed = true;
+    }
+    changed = true;
+  };
+
+  // 1) 時間による沈降: 実効年齢が閾値を超えた生きた粒は漂流する(軌道上の彗星は凍結)
+  for (const g of state.grains) {
+    if (g.status === 'alive' && !isAwayComet(g) && effectiveAge(g, eco) > P.SINK_AGE_SECONDS) {
+      sink(g);
     }
   }
 
@@ -65,8 +86,7 @@ export function cull(state: State, eco: number): boolean {
     const coldestFirst = [...disp].sort((a, b) => effectiveAge(b, eco) - effectiveAge(a, eco));
     for (const g of coldestFirst) {
       if (disp.length <= P.BAND_LIMIT) break;
-      g.status = 'drifted';
-      changed = true;
+      sink(g);
       disp = displayedGrains(state, eco);
     }
   }
