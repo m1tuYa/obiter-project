@@ -303,7 +303,18 @@ function renderThread(): void {
   elThreadTitle.textContent = theme.name;
   elThreadList.innerHTML = '';
 
-  const grains = themeGrains(openThemeId).sort((a, b) => b.createdAtWall - a.createdAtWall);
+  // 本文の粒は新しい順(先端が最初)。付箋は貼り先の直下に置く
+  const all = themeGrains(openThemeId);
+  const mains = all.filter((g) => !g.attachedToId).sort((a, b) => b.createdAtWall - a.createdAtWall);
+  const mainIds = new Set(mains.map((g) => g.id));
+  const stickersOf = (id: string) =>
+    all.filter((g) => g.attachedToId === id).sort((a, b) => a.createdAtWall - b.createdAtWall);
+  // 貼り先が本文でない付箋(付箋への付箋など)は先頭にまとめる
+  const orphans = all.filter((g) => g.attachedToId && !mainIds.has(g.attachedToId));
+  const grains: Grain[] = [...orphans];
+  for (const m of mains) {
+    grains.push(m, ...stickersOf(m.id));
+  }
   for (const g of grains) {
     const div = document.createElement('div');
     div.className = 'thread-grain';
@@ -333,7 +344,12 @@ function renderSearch(): void {
   if (!q) return;
 
   const hits = state.grains
-    .filter((g) => g.text.toLowerCase().includes(q) || (g.closedNote ?? '').toLowerCase().includes(q))
+    .filter(
+      (g) =>
+        g.text.toLowerCase().includes(q) ||
+        (g.closedNote ?? '').toLowerCase().includes(q) ||
+        (g.revivedNote ?? '').toLowerCase().includes(q),
+    )
     .sort((a, b) => b.createdAtWall - a.createdAtWall)
     .slice(0, 100);
 
@@ -552,6 +568,7 @@ $<HTMLInputElement>('#btn-import').addEventListener('change', async (e) => {
   state = imported;
   eco = state.ecoSeconds;
   selection = [];
+  cull(state, eco);
   saveState(state);
   render();
   (e.target as HTMLInputElement).value = '';
