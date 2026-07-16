@@ -2,13 +2,14 @@ import { PARAMS as P } from './params';
 import type { Grain, State } from './types';
 import { displayedGrains, effectiveAge, isOpenQuestion, tierOf } from './ecosystem';
 
-// 「今」の面のCanvas描画。周回・ズーム・回転・参照系の乗り移り・星座を担う。
-// 力学だけを借り、見た目は抽象に保つ。
+// 「今」の面のCanvas描画。周回・ズーム・回転・参照系・星座・フォーカスを担う。
 //
 // 星座の規律:
-// - 粒は常に点(星)として存在し、文字はそのラベル
-// - テーマの尾(代表粒の後ろの点と線)だけは常設 —— 周回モデルの部品表通り
+// - 粒は常に星(点)として存在し、文字は星の下に中央揃えで添えられる
+// - テーマの尾(代表粒の後ろの点と線)だけは常設
 // - それ以外の線は常設しない。選択した粒の幹・付箋のみが星座として召喚される
+// - 選択=参照系に乗る+その粒が画面中心へ来る(フォーカス)。全文が読める大きさになり、
+//   星座の縁者の文字も濃く読みやすくなる。選択を外せばすべて元に戻る(視点は揮発)
 
 export interface SkyHooks {
   getState(): State;
@@ -17,7 +18,7 @@ export interface SkyHooks {
   setSelection(ids: string[]): void;
   openTheme(themeId: string): void;
   correct(grainId: string): void;
-  closeGrain(grainId: string): void; // 惑星への突入(ドラッグで落とす閉幕)
+  closeGrain(grainId: string): void;
   isActive(): boolean;
 }
 
@@ -34,7 +35,7 @@ interface DrawnItem {
   dotY: number;
   bounds: Bounds;
   themeRect?: { x: number; y: number; w: number; h: number; themeId: string };
-  phantom?: boolean; // 召喚された(軌道上にいない)幹・付箋
+  phantom?: boolean;
 }
 
 const FONT_STACK = '"Hiragino Sans", "Yu Gothic UI", sans-serif';
@@ -48,11 +49,21 @@ export class Sky {
   private manualRot = 0;
   private animT = 0; // フォーカス中だけ進む(不在中は空も凍結)
   private lastFrame = 0;
+  private frameDt = 0;
   private drawn: DrawnItem[] = [];
 
   // 参照系
   private refId: string | null = null;
   private refFrozenAngle = 0;
+
+  // フォーカスのカメラ(選択粒を画面中心へ)。保存しない=視点は揮発
+  private camX = 0;
+  private camY = 0;
+
+  // 直近フレームの惑星情報(入力処理用)
+  private lastCenterX = 0;
+  private lastCenterY = 0;
+  private lastPlanetR = 0;
 
   // 入力状態
   private pointerMode: 'none' | 'dial' | 'grain' = 'none';
@@ -119,9 +130,9 @@ export class Sky {
   // ---------- 描画ループ ----------
 
   private frame = (t: number): void => {
-    const dt = this.lastFrame ? Math.min(0.1, (t - this.lastFrame) / 1000) : 0;
+    this.frameDt = this.lastFrame ? Math.min(0.1, (t - this.lastFrame) / 1000) : 0;
     this.lastFrame = t;
-    if (!document.hidden && document.hasFocus()) this.animT += dt;
+    if (!document.hidden && document.hasFocus()) this.animT += this.frameDt;
     if (this.hooks.isActive()) this.draw();
     requestAnimationFrame(this.frame);
   };
@@ -147,41 +158,24 @@ export class Sky {
     const state = this.hooks.getState();
     const eco = this.hooks.getEco();
     const selection = this.hooks.getSelection();
-    const cx = cw / 2;
-    const cy = ch / 2;
     const short = Math.min(cw, ch);
+    const planetRBase = this.planetRadius(short, state);
+    const focusedId = selection.length === 1 ? selection[0] : null;
 
-    // ---- 惑星 ----
-    const planetR = this.planetRadius(short, state);
-    const draggingOverPlanet =
-      this.pointerMode === 'grain' &&
-      this.dragMoved &&
-      Math.hypot(this.dragX - cx, this.dragY - cy) <= planetR * 1.4;
+    // 選択粒の星座の縁者(文字を濃く読みやすくする対象)
+    const relativeIds = new Set<string>();
+    if (focusedId) {
+      const fg = state.grains.find((g) => g.id === focusedId);
+      if (fg) {
+        for (const pid of fg.parentIds) relativeIds.add(pid);
+        for (const s of state.grains) if (s.attachedToId === fg.id) relativeIds.add(s.id);
+      }
+    }
 
-    const grad = ctx.createRadialGradient(cx - planetR * 0.3, cy - planetR * 0.35, planetR * 0.1, cx, cy, planetR);
-    grad.addColorStop(0, '#3a4258');
-    grad.addColorStop(0.45, '#2a3040');
-    grad.addColorStop(0.8, '#1a1f2c');
-    grad.addColorStop(1, '#12161f');
-    ctx.beginPath();
-    ctx.arc(cx, cy, planetR, 0, 2 * Math.PI);
-    ctx.fillStyle = grad;
-    ctx.fill();
-    // 光暈。粒を掴んで上空に来ると微かに強まる(突入の予告)
-    const haloAlpha = draggingOverPlanet ? 0.22 : 0.08;
-    const haloR = planetR * (draggingOverPlanet ? 1.6 : 1.35);
-    ctx.beginPath();
-    ctx.arc(cx, cy, haloR, 0, 2 * Math.PI);
-    const halo = ctx.createRadialGradient(cx, cy, planetR, cx, cy, haloR);
-    halo.addColorStop(0, `rgba(100,120,170,${haloAlpha})`);
-    halo.addColorStop(1, 'rgba(100,120,170,0)');
-    ctx.fillStyle = halo;
-    ctx.fill();
-
-    // ---- 粒の位置計算 ----
+    // ---- 位置の事前計算(惑星原点の相対座標) ----
     const grains = displayedGrains(state, eco).sort((a, b) => b.lastTouchEco - a.lastTouchEco);
     const n = Math.max(grains.length, 1);
-    const rMin = Math.max(short * P.RADIUS_MIN_RATIO * this.zoom, planetR + 34);
+    const rMin = Math.max(short * P.RADIUS_MIN_RATIO * this.zoom, planetRBase + 34);
     const rMax = short * P.RADIUS_MAX_RATIO * this.zoom;
 
     let refOffset = 0;
@@ -193,19 +187,25 @@ export class Sky {
 
     interface Pending {
       g: Grain;
-      x: number;
-      y: number;
+      relX: number; // 惑星からの相対座標
+      relY: number;
       angle: number;
       r: number;
       fontPx: number;
       alpha: number;
       lines: string[];
       textOnly: boolean;
+      maxLines: number;
+      budget: number;
       themeName?: string;
       selected: boolean;
+      focused: boolean;
+      relative: boolean;
       question: boolean;
       frac: number;
       dotR: number;
+      x: number;
+      y: number;
     }
     const pendings: Pending[] = [];
 
@@ -216,37 +216,113 @@ export class Sky {
       const base = -Math.PI / 2 + (i * 2 * Math.PI) / n;
       const angle = base + this.animT * this.orbitOmega(frac) - refOffset + this.manualRot;
       const r = rMin + Math.pow(frac, 0.6) * (rMax - rMin);
-      let x = cx + r * Math.cos(angle);
-      let y = cy + r * Math.sin(angle);
 
-      // 掴まれている粒はポインタに従う(揮発的。離せば軌道に戻る)
-      if (this.pointerMode === 'grain' && this.dragMoved && this.dragGrainId === g.id) {
-        x = this.dragX;
-        y = this.dragY;
+      const focused = g.id === focusedId;
+      const relative = relativeIds.has(g.id);
+
+      let fontPx = tier.fontSizePx * Math.pow(this.zoom, 0.9);
+      let alpha = tier.opacity;
+      let budget = Math.round((14 + 60 * (1 - frac)) * this.zoom);
+      let maxLines = 3;
+      if (focused) {
+        // フォーカス: 読みやすい大きさで全文
+        fontPx = Math.max(fontPx, 16);
+        alpha = 1;
+        budget = Infinity;
+        maxLines = 6;
+      } else if (relative) {
+        // 星座の縁者: 文字を濃く、最低限読める量に
+        fontPx = Math.max(fontPx, 11.5);
+        alpha = Math.max(alpha, 0.85);
+        budget = Math.max(budget, 34);
       }
+      const textOnly = focused || relative || !(fontPx < 7 || budget < 4);
 
-      const fontPx = tier.fontSizePx * Math.pow(this.zoom, 0.9);
-      const budget = Math.round((14 + 60 * (1 - frac)) * this.zoom);
-      const textOnly = !(fontPx < 7 || budget < 4); // falseなら点+テーマ名だけ
       const theme = g.themeId ? state.themes.find((t) => t.id === g.themeId) : undefined;
-
       pendings.push({
         g,
-        x,
-        y,
+        relX: r * Math.cos(angle),
+        relY: r * Math.sin(angle),
         angle,
         r,
         fontPx,
-        alpha: tier.opacity,
+        alpha,
         lines: [],
         textOnly,
+        maxLines,
+        budget,
         themeName: theme?.name,
         selected: selection.includes(g.id),
+        focused,
+        relative,
         question: isOpenQuestion(g),
         frac,
         dotR: (2 + 2.5 * (1 - frac)) * Math.sqrt(Math.max(this.zoom, 0.4)),
+        x: 0,
+        y: 0,
       });
     });
+
+    // ---- カメラ: フォーカス粒を画面中心へ滑らかに寄せる(視点は揮発) ----
+    let camTX = 0;
+    let camTY = 0;
+    if (focusedId) {
+      const fp = pendings.find((p) => p.g.id === focusedId);
+      if (fp) {
+        camTX = -fp.relX;
+        camTY = -fp.relY;
+      }
+    }
+    const k = 1 - Math.exp(-6 * this.frameDt);
+    this.camX += (camTX - this.camX) * k;
+    this.camY += (camTY - this.camY) * k;
+
+    const cx = cw / 2 + this.camX;
+    const cy = ch / 2 + this.camY;
+    this.lastCenterX = cx;
+    this.lastCenterY = cy;
+    this.lastPlanetR = planetRBase;
+
+    for (const p of pendings) {
+      p.x = cx + p.relX;
+      p.y = cy + p.relY;
+      if (this.pointerMode === 'grain' && this.dragMoved && this.dragGrainId === p.g.id) {
+        p.x = this.dragX;
+        p.y = this.dragY;
+      }
+    }
+
+    // ---- 惑星 ----
+    const draggingOverPlanet =
+      this.pointerMode === 'grain' &&
+      this.dragMoved &&
+      Math.hypot(this.dragX - cx, this.dragY - cy) <= planetRBase * 1.4;
+
+    const grad = ctx.createRadialGradient(
+      cx - planetRBase * 0.3,
+      cy - planetRBase * 0.35,
+      planetRBase * 0.1,
+      cx,
+      cy,
+      planetRBase,
+    );
+    grad.addColorStop(0, '#3a4258');
+    grad.addColorStop(0.45, '#2a3040');
+    grad.addColorStop(0.8, '#1a1f2c');
+    grad.addColorStop(1, '#12161f');
+    ctx.beginPath();
+    ctx.arc(cx, cy, planetRBase, 0, 2 * Math.PI);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    const haloAlpha = draggingOverPlanet ? 0.22 : 0.08;
+    const haloR = planetRBase * (draggingOverPlanet ? 1.6 : 1.35);
+    ctx.beginPath();
+    ctx.arc(cx, cy, haloR, 0, 2 * Math.PI);
+    const halo = ctx.createRadialGradient(cx, cy, planetRBase, cx, cy, haloR);
+    halo.addColorStop(0, `rgba(100,120,170,${haloAlpha})`);
+    halo.addColorStop(1, 'rgba(100,120,170,0)');
+    ctx.fillStyle = halo;
+    ctx.fill();
 
     // ---- テーマの尾(常設の点と線) ----
     ctx.lineWidth = 1;
@@ -261,10 +337,9 @@ export class Sky {
       let prevX = p.x;
       let prevY = p.y;
       ctx.strokeStyle = `rgba(${COLOR_THEME}, 0.18)`;
-      tail.forEach((t, k) => {
-        // 尾は軌道の後方(角度の負方向)へ、わずかに外周寄りに引かれる
-        const ta = p.angle - (k + 1) * 0.055;
-        const tr = p.r + (k + 1) * 9 * Math.sqrt(this.zoom);
+      tail.forEach((t, idx) => {
+        const ta = p.angle - (idx + 1) * 0.055;
+        const tr = p.r + (idx + 1) * 9 * Math.sqrt(this.zoom);
         const tx = cx + tr * Math.cos(ta);
         const ty = cy + tr * Math.sin(ta);
         ctx.beginPath();
@@ -281,32 +356,38 @@ export class Sky {
       });
     }
 
-    // ---- 粒(星+ラベル)。熱い順に置き、重なったら冷たい側の文字を縮める ----
+    // ---- 粒(星の下に中央揃えの文字)。熱い順に置き、重なったら冷たい側を縮める ----
     this.drawn = [];
     const placedRects: Bounds[] = [];
     const GAP = 4;
     const overlaps = (a: Bounds) =>
       placedRects.some((b) => a.l < b.r + GAP && b.l < a.r + GAP && a.t < b.b + GAP && b.t < a.b + GAP);
 
-    for (const p of pendings) {
+    // フォーカス/縁者を先に置いて場所を確保する
+    const ordered = [...pendings].sort((a, b) => {
+      const pa = a.focused ? 2 : a.relative ? 1 : 0;
+      const pb = b.focused ? 2 : b.relative ? 1 : 0;
+      return pb - pa;
+    });
+
+    for (const p of ordered) {
       let bounds: Bounds;
-      let maxW = 0;
       if (p.textOnly) {
-        const budget = Math.round((14 + 60 * (1 - p.frac)) * this.zoom);
-        const text = p.g.text.length > budget ? p.g.text.slice(0, budget) + '…' : p.g.text;
+        const text = p.g.text.length > p.budget ? p.g.text.slice(0, p.budget) + '…' : p.g.text;
         while (true) {
           ctx.font = `${p.fontPx}px ${FONT_STACK}`;
-          const maxLineW = Math.min(380, Math.max(130, 260 * this.zoom));
-          p.lines = wrapText(ctx, text, maxLineW, 3);
-          maxW = Math.max(...p.lines.map((l) => ctx.measureText(l).width), 1);
-          const totalH = p.lines.length * p.fontPx * 1.4 + (p.themeName ? p.fontPx * 0.95 : 0);
+          const maxLineW = p.focused ? Math.min(460, cw * 0.6) : Math.min(380, Math.max(130, 260 * this.zoom));
+          p.lines = wrapText(ctx, text, maxLineW, p.maxLines);
+          const maxW = Math.max(...p.lines.map((l) => ctx.measureText(l).width), p.dotR * 2);
+          const nameH = p.themeName ? Math.max(9, p.fontPx * 0.62) * 1.5 : 0;
+          const textH = p.lines.length * p.fontPx * 1.42;
           bounds = {
-            l: p.x - p.dotR,
-            t: p.y - totalH / 2,
-            r: p.x + p.dotR + 6 + maxW,
-            b: p.y + totalH / 2,
+            l: p.x - maxW / 2,
+            t: p.y - p.dotR - nameH - 2,
+            r: p.x + maxW / 2,
+            b: p.y + p.dotR + 4 + textH,
           };
-          if (!overlaps(bounds) || p.fontPx <= P.OVERLAP_MIN_FONT_PX) break;
+          if (p.focused || !overlaps(bounds) || p.fontPx <= P.OVERLAP_MIN_FONT_PX) break;
           p.fontPx = Math.max(P.OVERLAP_MIN_FONT_PX, p.fontPx * P.OVERLAP_SHRINK_FACTOR);
         }
       } else {
@@ -317,7 +398,7 @@ export class Sky {
       const rgb = p.question ? COLOR_ACCENT : COLOR_FG;
       const alpha = p.selected ? 1 : p.alpha;
 
-      // 星(点)は常設
+      // 星は常設。文字はその下に中央揃え
       if (p.selected) {
         ctx.shadowColor = `rgba(${rgb}, 0.9)`;
         ctx.shadowBlur = 12;
@@ -329,36 +410,35 @@ export class Sky {
       ctx.shadowBlur = 0;
 
       let themeRect: DrawnItem['themeRect'];
+      ctx.textAlign = 'center';
 
       if (p.textOnly) {
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        const textX = p.x + p.dotR + 6;
-        const lineH = p.fontPx * 1.4;
-        let startY = p.y - ((p.lines.length - 1) * lineH) / 2;
+        // テーマ名は星の上に
         if (p.themeName && p.g.themeId) {
           const nameFont = Math.max(9, p.fontPx * 0.62);
           ctx.font = `${nameFont}px ${FONT_STACK}`;
+          ctx.textBaseline = 'bottom';
           ctx.fillStyle = `rgba(${COLOR_THEME}, ${Math.min(1, alpha + 0.15)})`;
-          const nameY = startY - lineH * 0.5 - nameFont * 0.6;
-          ctx.fillText(p.themeName, textX, nameY);
+          const nameY = p.y - p.dotR - 4;
+          ctx.fillText(p.themeName, p.x, nameY);
           const w = ctx.measureText(p.themeName).width;
-          themeRect = { x: textX, y: nameY - nameFont * 0.7, w, h: nameFont * 1.4, themeId: p.g.themeId };
+          themeRect = { x: p.x - w / 2, y: nameY - nameFont * 1.2, w, h: nameFont * 1.4, themeId: p.g.themeId };
         }
+        // 本文は星の下に
         ctx.font = `${p.fontPx}px ${FONT_STACK}`;
+        ctx.textBaseline = 'top';
         ctx.fillStyle = `rgba(${rgb}, ${alpha})`;
-        let ly = startY;
+        const lineH = p.fontPx * 1.42;
+        let ly = p.y + p.dotR + 4;
         for (const line of p.lines) {
-          ctx.fillText(line, textX, ly);
+          ctx.fillText(line, p.x, ly);
           ly += lineH;
         }
       } else if (p.themeName && p.g.themeId) {
-        // 全天でもテーマ名だけは微かに浮かぶ
         const nameFont = Math.max(9, 10 * this.zoom);
         ctx.font = `${nameFont}px ${FONT_STACK}`;
-        ctx.fillStyle = `rgba(${COLOR_THEME}, 0.75)`;
-        ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
+        ctx.fillStyle = `rgba(${COLOR_THEME}, 0.75)`;
         ctx.fillText(p.themeName, p.x, p.y + p.dotR + 3);
         const w = ctx.measureText(p.themeName).width;
         themeRect = { x: p.x - w / 2, y: p.y + p.dotR + 3, w, h: nameFont * 1.3, themeId: p.g.themeId };
@@ -367,9 +447,9 @@ export class Sky {
       this.drawn.push({ g: p.g, dotX: p.x, dotY: p.y, bounds: bounds!, themeRect });
     }
 
-    // ---- 星座の召喚: 選択した粒の幹・付箋だけ線で結ぶ(線は常設しない) ----
-    if (selection.length === 1) {
-      const sel = this.drawn.find((d) => d.g.id === selection[0] && !d.phantom);
+    // ---- 星座の召喚 ----
+    if (focusedId) {
+      const sel = this.drawn.find((d) => d.g.id === focusedId && !d.phantom);
       if (sel) this.drawConstellation(sel, state, cx, cy);
     }
   }
@@ -386,7 +466,6 @@ export class Sky {
     ];
     if (relatives.length === 0) return;
 
-    // 幻影の配置: 惑星と反対側(外向き)に扇形に開く
     const ux = sel.dotX - cx;
     const uy = sel.dotY - cy;
     const baseAngle = Math.atan2(uy, ux);
@@ -402,10 +481,9 @@ export class Sky {
         tx = target.dotX;
         ty = target.dotY;
       } else {
-        // 幻影の星
         const m = phantoms.length;
         const spread = m > 1 ? -0.55 + (1.1 * phantomIndex) / (m - 1) : 0;
-        const dist = 64 * Math.max(0.7, Math.min(this.zoom, 1.5)) + phantomIndex * 6;
+        const dist = 110 * Math.max(0.7, Math.min(this.zoom, 1.5)) + phantomIndex * 8;
         tx = sel.dotX + Math.cos(baseAngle + spread) * dist;
         ty = sel.dotY + Math.sin(baseAngle + spread) * dist;
         phantomIndex++;
@@ -415,43 +493,40 @@ export class Sky {
       const question = isOpenQuestion(rel.grain);
       const rgb = question ? COLOR_ACCENT : COLOR_FG;
 
-      // 線(線上に種別を小さく)
       ctx.beginPath();
       ctx.moveTo(sel.dotX, sel.dotY);
       ctx.lineTo(tx, ty);
-      ctx.strokeStyle = `rgba(${COLOR_FG}, ${dead ? 0.12 : 0.22})`;
+      ctx.strokeStyle = `rgba(${COLOR_FG}, ${dead ? 0.15 : 0.3})`;
       ctx.lineWidth = 1;
       ctx.stroke();
-      const midX = (sel.dotX + tx) / 2;
-      const midY = (sel.dotY + ty) / 2;
       ctx.font = `9px ${FONT_STACK}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.fillStyle = `rgba(${COLOR_FG}, 0.3)`;
-      ctx.fillText(rel.kind, midX, midY - 2);
+      ctx.fillStyle = `rgba(${COLOR_FG}, 0.38)`;
+      ctx.fillText(rel.kind, (sel.dotX + tx) / 2, (sel.dotY + ty) / 2 - 2);
 
       if (!target) {
         // 幻影の星とラベル(死者は薄く、状態を添える)
         ctx.beginPath();
-        ctx.arc(tx, ty, 2.2, 0, 2 * Math.PI);
-        ctx.fillStyle = `rgba(${rgb}, ${dead ? 0.3 : 0.6})`;
+        ctx.arc(tx, ty, 2.4, 0, 2 * Math.PI);
+        ctx.fillStyle = `rgba(${rgb}, ${dead ? 0.35 : 0.7})`;
         ctx.fill();
 
         const label =
-          clipText(rel.grain.text, 18) +
+          clipText(rel.grain.text, 24) +
           (rel.grain.status === 'drifted' ? ' ・漂流' : rel.grain.status === 'closed' ? ' ・閉幕' : '');
-        ctx.font = `10px ${FONT_STACK}`;
+        ctx.font = `11px ${FONT_STACK}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillStyle = `rgba(${rgb}, ${dead ? 0.3 : 0.55})`;
-        ctx.fillText(label, tx, ty + 5);
+        ctx.fillStyle = `rgba(${rgb}, ${dead ? 0.4 : 0.75})`;
+        ctx.fillText(label, tx, ty + 6);
         const w = ctx.measureText(label).width;
 
         this.drawn.push({
           g: rel.grain,
           dotX: tx,
           dotY: ty,
-          bounds: { l: tx - Math.max(w / 2, 8), t: ty - 8, r: tx + Math.max(w / 2, 8), b: ty + 18 },
+          bounds: { l: tx - Math.max(w / 2, 8), t: ty - 8, r: tx + Math.max(w / 2, 8), b: ty + 20 },
           phantom: true,
         });
       }
@@ -511,16 +586,12 @@ export class Sky {
 
       if (mode === 'grain' && moved && grainId) {
         // 惑星に落とせば突入(閉幕)。それ以外は軌道に戻る
-        const cx = this.canvas.clientWidth / 2;
-        const cy = this.canvas.clientHeight / 2;
-        const short = Math.min(this.canvas.clientWidth, this.canvas.clientHeight);
-        const planetR = this.planetRadius(short, this.hooks.getState());
-        if (Math.hypot(e.offsetX - cx, e.offsetY - cy) <= planetR * 1.4) {
+        if (Math.hypot(e.offsetX - this.lastCenterX, e.offsetY - this.lastCenterY) <= this.lastPlanetR * 1.4) {
           this.hooks.closeGrain(grainId);
         }
         return;
       }
-      if (moved) return; // ダイヤル回転。クリックではない
+      if (moved) return;
 
       const hit = this.hitTest(e.offsetX, e.offsetY);
       const selection = this.hooks.getSelection();
@@ -533,7 +604,6 @@ export class Sky {
         return;
       }
       if (hit.phantom) {
-        // 幻影(召喚された縁者)は生きていれば選択が移る。死者は表示のみ
         if (hit.alive && hit.grainId) this.hooks.setSelection([hit.grainId]);
         return;
       }
@@ -552,9 +622,7 @@ export class Sky {
   }
 
   private pointerAngle(e: PointerEvent): number {
-    const cx = this.canvas.clientWidth / 2;
-    const cy = this.canvas.clientHeight / 2;
-    return Math.atan2(e.offsetY - cy, e.offsetX - cx);
+    return Math.atan2(e.offsetY - this.lastCenterY, e.offsetX - this.lastCenterX);
   }
 
   private hitTest(
@@ -562,7 +630,6 @@ export class Sky {
     y: number,
   ): { grainId?: string; themeId?: string; phantom?: boolean; alive?: boolean } | null {
     const PAD = 5;
-    // 幻影(後から積まれた側)を優先して手前から探す
     for (let i = this.drawn.length - 1; i >= 0; i--) {
       const d = this.drawn[i];
       if (d.themeRect) {
