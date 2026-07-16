@@ -2,7 +2,7 @@ import './style.css';
 import { PARAMS as P } from './params';
 import type { Grain, State, Theme } from './types';
 import { loadState, saveState, exportJson, parseImportedJson } from './store';
-import { cull, isOpenQuestion, touch } from './ecosystem';
+import { cull, ensureAngles, hashAngle, isOpenQuestion, touch } from './ecosystem';
 import { buildSampleState } from './sample';
 import { Sky } from './sky';
 
@@ -17,6 +17,7 @@ import { Sky } from './sky';
 
 // ---------- 状態 ----------
 let state: State = loadState();
+ensureAngles(state);
 let eco = state.ecoSeconds;
 let selection: string[] = [];
 let sky: Sky;
@@ -91,8 +92,16 @@ function newGrain(
   text: string,
   opts: { parents?: string[]; attachedTo?: string | null; themeId?: string | null } = {},
 ): Grain {
+  const id = crypto.randomUUID();
+  // 固有の角度: 親(貼り先・追記元)がいればそのそば、無所属なら空のどこかへ。以後他の星の出来事では動かない
+  const anchorId = opts.attachedTo ?? opts.parents?.[0];
+  const anchor = anchorId ? grainById(anchorId) : undefined;
+  const angle =
+    anchor && typeof anchor.angle === 'number'
+      ? anchor.angle + (Math.random() - 0.5) * 0.5
+      : hashAngle(id) + Math.random() * 0.3;
   const g: Grain = {
-    id: crypto.randomUUID(),
+    id,
     text,
     createdAtWall: Date.now(),
     lastTouchEco: eco,
@@ -101,6 +110,7 @@ function newGrain(
     attachedToId: opts.attachedTo ?? null,
     themeId: opts.themeId ?? null,
     cometReturnAtWall: null,
+    angle,
   };
   // 接触: 親(付箋の貼り先・追記元・合流元)の時計が巻き戻る
   for (const pid of g.parentIds) {
@@ -139,6 +149,32 @@ function precipitate(grainId: string, name: string): void {
   state.themes.push(theme);
   g.themeId = theme.id;
   commit();
+}
+
+// 細い幹を張る: 星を星に落とすと子としてリンクし、そのそばへ移る。
+// 幹(parentIds)は不変なので、後から張る参照は linkIds に持つ。時計は巻き戻さない
+function linkGrains(childId: string, targetId: string): void {
+  if (childId === targetId) return;
+  const child = grainById(childId);
+  const target = grainById(targetId);
+  if (!child || !target) return;
+  child.linkIds = child.linkIds ?? [];
+  if (!child.linkIds.includes(targetId) && !child.parentIds.includes(targetId) && child.attachedToId !== targetId) {
+    child.linkIds.push(targetId);
+  }
+  if (typeof target.angle === 'number') {
+    child.angle = target.angle + (Math.random() - 0.5) * 0.5;
+  }
+  saveState(state);
+  render();
+}
+
+// 角度の調整(ドラッグで空に落とす)。半径=温度は変えられない
+function repositionGrain(grainId: string, angle: number): void {
+  const g = grainById(grainId);
+  if (!g) return;
+  g.angle = angle;
+  saveState(state);
 }
 
 // 蘇生: 一言が必須(生かす操作は重く)
@@ -652,6 +688,7 @@ $<HTMLInputElement>('#menu-import').addEventListener('change', async (e) => {
   }
   if (!window.confirm('現在のデータを読み込んだ内容で置き換えます。よろしいですか?')) return;
   state = imported;
+  ensureAngles(state);
   eco = state.ecoSeconds;
   selection = [];
   closeBand();
@@ -669,6 +706,7 @@ function loadSample(needConfirm: boolean): void {
     if (!window.confirm('現在のデータをサンプルで置き換えます。よろしいですか?(先に「書き出し」で退避できます)')) return;
   }
   state = buildSampleState();
+  ensureAngles(state);
   eco = state.ecoSeconds;
   selection = [];
   closeBand();
@@ -711,6 +749,8 @@ sky = new Sky($<HTMLCanvasElement>('#sky-canvas'), {
   openTheme: (id: string) => openBand(id),
   correct: beginCorrect,
   closeGrain: (id: string) => closeGrains([id]),
+  linkGrains,
+  repositionGrain,
   isActive: () => true,
 });
 cull(state, eco); // 前回終了後の状態でも規律を守らせてから描画

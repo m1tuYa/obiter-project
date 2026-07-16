@@ -8,10 +8,12 @@ export interface Grain {
   status: GrainStatus;
   closedNote?: string;        // 閉幕時の一言（任意）
   revivedNote?: string;       // 蘇生時の一言（蘇生には必須）
-  parentIds: string[];        // 幹（系譜）。不変
+  parentIds: string[];        // 幹（系譜）。作成時に決まり不変
+  linkIds?: string[];         // 細い幹。ドラッグで後から張る弱い参照
   attachedToId?: string | null; // 付箋の場合、貼り付き先の粒
   themeId?: string | null;    // 析出済みならテーマID
   cometReturnAtWall?: number | null; // 彗星: 帰還予定日（第一段では未使用）
+  angle?: number;             // 空での固有の角度(ラジアン)。誕生時に決まり、ドラッグでのみ動く
 }
 
 export interface Theme {

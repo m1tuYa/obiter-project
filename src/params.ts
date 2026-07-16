@@ -39,10 +39,10 @@ export const PARAMS = {
   RADIUS_MIN_RATIO: 0.12,
   RADIUS_MAX_RATIO: 0.46,
 
-  // ---------- 周回(運動は情報であって演出ではない) ----------
-  // 最も熱い粒の公転周期(滞在秒)。冷えた粒はこの ORBIT_COLD_FACTOR 倍まで遅くなる
-  ORBIT_PERIOD_HOT_SECONDS: 480,
-  ORBIT_COLD_FACTOR: 0.35,
+  // ---------- 周回 ----------
+  // 空全体の公転周期(閲覧秒)。全星が同じ速度で回るので星座は形を保つ。
+  // 温度は半径(外へ沈む)と文字の濃さで表現される
+  SKY_ROTATION_PERIOD_SECONDS: 1200,
 
   // ズームの範囲。最小=全天(点と塊の星空)、最大=地表寄り(全文で読む)
   ZOOM_MIN: 0.35,

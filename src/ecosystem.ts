@@ -74,6 +74,43 @@ export function cull(state: State, eco: number): boolean {
   return changed;
 }
 
+// 角度を持たない粒(旧データ・インポート)に固有の角度を与える。
+// 親がいる粒は親のそば、無所属はidのハッシュでばらまく。以後この角度は動かさない
+export function ensureAngles(state: State): void {
+  const byId = new Map(state.grains.map((g) => [g.id, g]));
+  const resolving = new Set<string>();
+
+  const resolve = (g: Grain): number => {
+    if (typeof g.angle === 'number') return g.angle;
+    if (resolving.has(g.id)) {
+      g.angle = hashAngle(g.id);
+      return g.angle;
+    }
+    resolving.add(g.id);
+    const parentId = g.attachedToId ?? g.parentIds[0];
+    const parent = parentId ? byId.get(parentId) : undefined;
+    g.angle = parent ? resolve(parent) + hashJitter(g.id) : hashAngle(g.id);
+    resolving.delete(g.id);
+    return g.angle;
+  };
+
+  for (const g of state.grains) resolve(g);
+}
+
+function hashOf(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+export function hashAngle(id: string): number {
+  return ((hashOf(id) % 3600) / 3600) * 2 * Math.PI;
+}
+
+export function hashJitter(id: string): number {
+  return ((((hashOf(id) >>> 8) % 100) - 50) / 100) * 0.6;
+}
+
 export function tierOf(effAge: number): { fontSizePx: number; opacity: number } {
   for (const t of P.DISPLAY_TIERS) {
     if (effAge <= t.upToSeconds) return t;

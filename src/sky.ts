@@ -2,14 +2,15 @@ import { PARAMS as P } from './params';
 import type { Grain, State } from './types';
 import { displayedGrains, effectiveAge, isOpenQuestion, tierOf } from './ecosystem';
 
-// 「今」の面のCanvas描画。周回・ズーム・回転・参照系・星座・フォーカスを担う。
+// 「今」の面のCanvas描画。
 //
-// 星座の規律:
-// - 粒は常に星(点)として存在し、文字は星の下に中央揃えで添えられる
-// - テーマの尾(代表粒の後ろの点と線)だけは常設
-// - それ以外の線は常設しない。選択した粒の幹・付箋のみが星座として召喚される
-// - 選択=参照系に乗る+その粒が画面中心へ来る(フォーカス)。全文が読める大きさになり、
-//   星座の縁者の文字も濃く読みやすくなる。選択を外せばすべて元に戻る(視点は揮発)
+// 空の規律:
+// - 各星は固有の角度(g.angle)を持つ。誕生・ドラッグでのみ決まり、他の星の出来事では動かない
+// - 空全体が同じ角速度でゆっくり回る。星座は形を保つ
+// - 温度は半径(外へ沈む)と文字の大きさ・濃さで表現される
+// - リンク(幹・細い幹・付箋)で繋がった表示中の星同士は淡い線で結ばれ、星座に見える
+// - 星を星に落とす=細い幹を張り、そのそばに移る。惑星に落とす=突入(閉幕)
+// - 選択した粒の星座は明るく召喚され、軌道上にいない縁者は幻影として現れる
 
 export interface SkyHooks {
   getState(): State;
@@ -19,6 +20,8 @@ export interface SkyHooks {
   openTheme(themeId: string): void;
   correct(grainId: string): void;
   closeGrain(grainId: string): void;
+  linkGrains(childId: string, targetId: string): void; // 細い幹を張る(ドラッグドロップ)
+  repositionGrain(grainId: string, angle: number): void; // 角度の調整(ドラッグ)
   isActive(): boolean;
 }
 
@@ -52,15 +55,16 @@ export class Sky {
   private frameDt = 0;
   private drawn: DrawnItem[] = [];
 
-  // 参照系
+  // 参照系(乗ると空の回転が止まって見える)
   private refId: string | null = null;
   private refFrozenAngle = 0;
+  private lastRefOffset = 0;
 
-  // フォーカスのカメラ(選択粒を画面中心へ)。保存しない=視点は揮発
+  // フォーカスのカメラ。保存しない=視点は揮発
   private camX = 0;
   private camY = 0;
 
-  // 直近フレームの惑星情報(入力処理用)
+  // 直近フレームの幾何(入力処理用)
   private lastCenterX = 0;
   private lastCenterY = 0;
   private lastPlanetR = 0;
@@ -92,10 +96,10 @@ export class Sky {
     }
     const id = ids[0];
     if (this.refId === id) return;
-    const a = this.computeAngles().get(id);
-    if (a !== undefined) {
+    const g = this.hooks.getState().grains.find((x) => x.id === id);
+    if (g && typeof g.angle === 'number') {
       this.refId = id;
-      this.refFrozenAngle = a;
+      this.refFrozenAngle = this.currentAngle(g);
     } else {
       this.refId = null;
     }
@@ -108,23 +112,12 @@ export class Sky {
 
   // ---------- 力学 ----------
 
-  private orbitOmega(frac: number): number {
-    const factor = 1 - frac * (1 - P.ORBIT_COLD_FACTOR);
-    return ((2 * Math.PI) / P.ORBIT_PERIOD_HOT_SECONDS) * factor;
+  private get omega(): number {
+    return (2 * Math.PI) / P.SKY_ROTATION_PERIOD_SECONDS;
   }
 
-  private computeAngles(): Map<string, number> {
-    const state = this.hooks.getState();
-    const eco = this.hooks.getEco();
-    const grains = displayedGrains(state, eco).sort((a, b) => b.lastTouchEco - a.lastTouchEco);
-    const n = Math.max(grains.length, 1);
-    const map = new Map<string, number>();
-    grains.forEach((g, i) => {
-      const frac = Math.min(1, effectiveAge(g, eco) / P.SINK_AGE_SECONDS);
-      const base = -Math.PI / 2 + (i * 2 * Math.PI) / n;
-      map.set(g.id, base + this.animT * this.orbitOmega(frac));
-    });
-    return map;
+  private currentAngle(g: Grain): number {
+    return (g.angle ?? 0) + this.animT * this.omega;
   }
 
   // ---------- 描画ループ ----------
@@ -168,26 +161,33 @@ export class Sky {
       const fg = state.grains.find((g) => g.id === focusedId);
       if (fg) {
         for (const pid of fg.parentIds) relativeIds.add(pid);
-        for (const s of state.grains) if (s.attachedToId === fg.id) relativeIds.add(s.id);
+        for (const lid of fg.linkIds ?? []) relativeIds.add(lid);
+        for (const s of state.grains) {
+          if (s.attachedToId === fg.id) relativeIds.add(s.id);
+          if ((s.linkIds ?? []).includes(fg.id)) relativeIds.add(s.id);
+        }
       }
     }
 
-    // ---- 位置の事前計算(惑星原点の相対座標) ----
+    // ---- 位置の事前計算 ----
     const grains = displayedGrains(state, eco).sort((a, b) => b.lastTouchEco - a.lastTouchEco);
-    const n = Math.max(grains.length, 1);
     const rMin = Math.max(short * P.RADIUS_MIN_RATIO * this.zoom, planetRBase + 34);
     const rMax = short * P.RADIUS_MAX_RATIO * this.zoom;
 
     let refOffset = 0;
     if (this.refId) {
-      const a = this.computeAngles().get(this.refId);
-      if (a !== undefined) refOffset = a - this.refFrozenAngle;
-      else this.refId = null;
+      const rg = state.grains.find((x) => x.id === this.refId);
+      if (rg && grains.some((x) => x.id === this.refId)) {
+        refOffset = this.currentAngle(rg) - this.refFrozenAngle;
+      } else {
+        this.refId = null;
+      }
     }
+    this.lastRefOffset = refOffset;
 
     interface Pending {
       g: Grain;
-      relX: number; // 惑星からの相対座標
+      relX: number;
       relY: number;
       angle: number;
       r: number;
@@ -209,12 +209,11 @@ export class Sky {
     }
     const pendings: Pending[] = [];
 
-    grains.forEach((g, i) => {
+    for (const g of grains) {
       const effAge = effectiveAge(g, eco);
       const frac = Math.min(1, effAge / P.SINK_AGE_SECONDS);
       const tier = tierOf(effAge);
-      const base = -Math.PI / 2 + (i * 2 * Math.PI) / n;
-      const angle = base + this.animT * this.orbitOmega(frac) - refOffset + this.manualRot;
+      const angle = this.currentAngle(g) - refOffset + this.manualRot;
       const r = rMin + Math.pow(frac, 0.6) * (rMax - rMin);
 
       const focused = g.id === focusedId;
@@ -225,13 +224,11 @@ export class Sky {
       let budget = Math.round((14 + 60 * (1 - frac)) * this.zoom);
       let maxLines = 3;
       if (focused) {
-        // フォーカス: 読みやすい大きさで全文
         fontPx = Math.max(fontPx, 16);
         alpha = 1;
         budget = Infinity;
         maxLines = 6;
       } else if (relative) {
-        // 星座の縁者: 文字を濃く、最低限読める量に
         fontPx = Math.max(fontPx, 11.5);
         alpha = Math.max(alpha, 0.85);
         budget = Math.max(budget, 34);
@@ -261,9 +258,9 @@ export class Sky {
         x: 0,
         y: 0,
       });
-    });
+    }
 
-    // ---- カメラ: フォーカス粒を画面中心へ滑らかに寄せる(視点は揮発) ----
+    // ---- カメラ: フォーカス粒を画面中心へ(視点は揮発) ----
     let camTX = 0;
     let camTY = 0;
     if (focusedId) {
@@ -283,6 +280,7 @@ export class Sky {
     this.lastCenterY = cy;
     this.lastPlanetR = planetRBase;
 
+    const byId = new Map<string, Pending>();
     for (const p of pendings) {
       p.x = cx + p.relX;
       p.y = cy + p.relY;
@@ -290,6 +288,7 @@ export class Sky {
         p.x = this.dragX;
         p.y = this.dragY;
       }
+      byId.set(p.g.id, p);
     }
 
     // ---- 惑星 ----
@@ -324,8 +323,27 @@ export class Sky {
     ctx.fillStyle = halo;
     ctx.fill();
 
-    // ---- テーマの尾(常設の点と線) ----
+    // ---- 星座の常設線: 表示中の星同士のリンク(幹・細い幹・付箋) ----
     ctx.lineWidth = 1;
+    ctx.strokeStyle = `rgba(${COLOR_FG}, 0.12)`;
+    const drawnPairs = new Set<string>();
+    for (const p of pendings) {
+      const targets = [...p.g.parentIds, ...(p.g.linkIds ?? [])];
+      if (p.g.attachedToId) targets.push(p.g.attachedToId);
+      for (const tid of targets) {
+        const t = byId.get(tid);
+        if (!t) continue;
+        const key = p.g.id < tid ? `${p.g.id}|${tid}` : `${tid}|${p.g.id}`;
+        if (drawnPairs.has(key)) continue;
+        drawnPairs.add(key);
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(t.x, t.y);
+        ctx.stroke();
+      }
+    }
+
+    // ---- テーマの尾(常設の点と線) ----
     for (const p of pendings) {
       if (!p.g.themeId) continue;
       const tail = state.grains
@@ -356,14 +374,13 @@ export class Sky {
       });
     }
 
-    // ---- 粒(星の下に中央揃えの文字)。熱い順に置き、重なったら冷たい側を縮める ----
+    // ---- 粒(星の下に中央揃えの文字) ----
     this.drawn = [];
     const placedRects: Bounds[] = [];
     const GAP = 4;
     const overlaps = (a: Bounds) =>
       placedRects.some((b) => a.l < b.r + GAP && b.l < a.r + GAP && a.t < b.b + GAP && b.t < a.b + GAP);
 
-    // フォーカス/縁者を先に置いて場所を確保する
     const ordered = [...pendings].sort((a, b) => {
       const pa = a.focused ? 2 : a.relative ? 1 : 0;
       const pb = b.focused ? 2 : b.relative ? 1 : 0;
@@ -398,7 +415,6 @@ export class Sky {
       const rgb = p.question ? COLOR_ACCENT : COLOR_FG;
       const alpha = p.selected ? 1 : p.alpha;
 
-      // 星は常設。文字はその下に中央揃え
       if (p.selected) {
         ctx.shadowColor = `rgba(${rgb}, 0.9)`;
         ctx.shadowBlur = 12;
@@ -413,7 +429,6 @@ export class Sky {
       ctx.textAlign = 'center';
 
       if (p.textOnly) {
-        // テーマ名は星の上に
         if (p.themeName && p.g.themeId) {
           const nameFont = Math.max(9, p.fontPx * 0.62);
           ctx.font = `${nameFont}px ${FONT_STACK}`;
@@ -424,7 +439,6 @@ export class Sky {
           const w = ctx.measureText(p.themeName).width;
           themeRect = { x: p.x - w / 2, y: nameY - nameFont * 1.2, w, h: nameFont * 1.4, themeId: p.g.themeId };
         }
-        // 本文は星の下に
         ctx.font = `${p.fontPx}px ${FONT_STACK}`;
         ctx.textBaseline = 'top';
         ctx.fillStyle = `rgba(${rgb}, ${alpha})`;
@@ -447,23 +461,42 @@ export class Sky {
       this.drawn.push({ g: p.g, dotX: p.x, dotY: p.y, bounds: bounds!, themeRect });
     }
 
-    // ---- 星座の召喚 ----
+    // ---- ドラッグ中: 落とし先の星を淡くリング表示 ----
+    if (this.pointerMode === 'grain' && this.dragMoved && this.dragGrainId) {
+      const target = this.findGrainAt(this.dragX, this.dragY, this.dragGrainId);
+      if (target) {
+        ctx.beginPath();
+        ctx.arc(target.dotX, target.dotY, 14, 0, 2 * Math.PI);
+        ctx.strokeStyle = `rgba(${COLOR_FG}, 0.35)`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    // ---- 星座の召喚(選択時のみ明るく) ----
     if (focusedId) {
       const sel = this.drawn.find((d) => d.g.id === focusedId && !d.phantom);
       if (sel) this.drawConstellation(sel, state, cx, cy);
     }
   }
 
-  // 選択粒の幹(親)と付箋を線で結ぶ。軌道上にいない縁者は幻影の星として召喚する
+  // 選択粒の幹・細い幹・付箋を明るい線で結ぶ。軌道上にいない縁者は幻影の星として召喚
   private drawConstellation(sel: DrawnItem, state: State, cx: number, cy: number): void {
     const ctx = this.ctx;
     const g = sel.g;
-    const parents = g.parentIds.map((id) => state.grains.find((x) => x.id === id)).filter((x): x is Grain => !!x);
-    const stickers = state.grains.filter((s) => s.attachedToId === g.id);
-    const relatives = [
-      ...parents.map((p) => ({ grain: p, kind: '幹' as const })),
-      ...stickers.map((s) => ({ grain: s, kind: '付箋' as const })),
-    ];
+    const relatives: { grain: Grain; kind: string }[] = [];
+    for (const pid of g.parentIds) {
+      const p = state.grains.find((x) => x.id === pid);
+      if (p) relatives.push({ grain: p, kind: '幹' });
+    }
+    for (const lid of g.linkIds ?? []) {
+      const l = state.grains.find((x) => x.id === lid);
+      if (l) relatives.push({ grain: l, kind: 'リンク' });
+    }
+    for (const s of state.grains) {
+      if (s.attachedToId === g.id) relatives.push({ grain: s, kind: '付箋' });
+      else if ((s.linkIds ?? []).includes(g.id)) relatives.push({ grain: s, kind: 'リンク' });
+    }
     if (relatives.length === 0) return;
 
     const ux = sel.dotX - cx;
@@ -506,7 +539,6 @@ export class Sky {
       ctx.fillText(rel.kind, (sel.dotX + tx) / 2, (sel.dotY + ty) / 2 - 2);
 
       if (!target) {
-        // 幻影の星とラベル(死者は薄く、状態を添える)
         ctx.beginPath();
         ctx.arc(tx, ty, 2.4, 0, 2 * Math.PI);
         ctx.fillStyle = `rgba(${rgb}, ${dead ? 0.35 : 0.7})`;
@@ -585,10 +617,20 @@ export class Sky {
       this.dragGrainId = null;
 
       if (mode === 'grain' && moved && grainId) {
-        // 惑星に落とせば突入(閉幕)。それ以外は軌道に戻る
+        // 惑星に落とす=突入(閉幕) / 星に落とす=細い幹を張り、そばへ移る / 空に落とす=角度の調整
         if (Math.hypot(e.offsetX - this.lastCenterX, e.offsetY - this.lastCenterY) <= this.lastPlanetR * 1.4) {
           this.hooks.closeGrain(grainId);
+          return;
         }
+        const target = this.findGrainAt(e.offsetX, e.offsetY, grainId);
+        if (target) {
+          this.hooks.linkGrains(grainId, target.g.id);
+          return;
+        }
+        // 画面座標 → 保存する固有角度に逆変換
+        const screenAngle = Math.atan2(e.offsetY - this.lastCenterY, e.offsetX - this.lastCenterX);
+        const storedAngle = screenAngle - this.animT * this.omega + this.lastRefOffset - this.manualRot;
+        this.hooks.repositionGrain(grainId, storedAngle);
         return;
       }
       if (moved) return;
@@ -623,6 +665,16 @@ export class Sky {
 
   private pointerAngle(e: PointerEvent): number {
     return Math.atan2(e.offsetY - this.lastCenterY, e.offsetX - this.lastCenterX);
+  }
+
+  private findGrainAt(x: number, y: number, excludeId: string): DrawnItem | null {
+    for (let i = this.drawn.length - 1; i >= 0; i--) {
+      const d = this.drawn[i];
+      if (d.phantom || d.g.id === excludeId) continue;
+      const b = d.bounds;
+      if (x >= b.l - 4 && x <= b.r + 4 && y >= b.t - 4 && y <= b.b + 4) return d;
+    }
+    return null;
   }
 
   private hitTest(
