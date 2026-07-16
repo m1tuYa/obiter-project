@@ -6,7 +6,8 @@ export interface Grain {
   createdAtWall: number;      // 壁時計の作成時刻（表示用、epoch ms）
   lastTouchEco: number;       // 生態系時刻（秒）での最終接触
   status: GrainStatus;
-  closedNote?: string;        // 閉幕時の一言（任意）
+  closedAtWall?: number;      // 閉幕した時刻。惑星内の堆積順(考古学)に使う
+  closedNote?: string;        // 閉幕時の一言（任意）= 墓碑銘
   revivedNote?: string;       // 蘇生時の一言（蘇生には必須）
   parentIds: string[];        // 幹（系譜）。作成時に決まり不変
   linkIds?: string[];         // 細い幹。ドラッグで後から張る弱い参照

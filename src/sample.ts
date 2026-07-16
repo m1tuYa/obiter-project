@@ -113,13 +113,37 @@ export function buildSampleState(): State {
         status: 'alive', parentIds: ['smp-t3'], attachedToId: 'smp-t3', themeId: 'smp-theme-1', cometReturnAtWall: null,
       },
 
-      // ---- 死者(検索で見つかる) ----
+      // ---- 死者(検索で見つかる。閉幕組は惑星の断面に眠る) ----
       {
         id: 'smp-g9',
         text: 'ダークモードの配色はあとで調整する',
         createdAtWall: now - 2 * d,
         lastTouchEco: 3000,
-        status: 'closed', closedNote: '試しに閉じてみた。閉幕は軽い',
+        status: 'closed', closedAtWall: now - 20 * h, closedNote: '試しに閉じてみた。閉幕は軽い',
+        parentIds: [], attachedToId: null, themeId: null, cometReturnAtWall: null,
+      },
+      {
+        id: 'smp-g12',
+        text: '週次レビューの仕組みを考える',
+        createdAtWall: now - 3 * d,
+        lastTouchEco: 2000,
+        status: 'closed', closedAtWall: now - 2 * d, closedNote: '仕組みではなく習慣の問題だった',
+        parentIds: [], attachedToId: null, themeId: null, cometReturnAtWall: null,
+      },
+      {
+        id: 'smp-g13',
+        text: '?メモは何のために取るのか',
+        createdAtWall: now - 3 * d,
+        lastTouchEco: 2500,
+        status: 'closed', closedAtWall: now - 40 * h, closedNote: '答えは「思い出すため」ではなかった',
+        parentIds: [], attachedToId: null, themeId: null, cometReturnAtWall: null,
+      },
+      {
+        id: 'smp-g14',
+        text: '読書リストの整理',
+        createdAtWall: now - 60 * h,
+        lastTouchEco: 2800,
+        status: 'closed', closedAtWall: now - 30 * h,
         parentIds: [], attachedToId: null, themeId: null, cometReturnAtWall: null,
       },
       {

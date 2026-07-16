@@ -118,6 +118,7 @@ function newGrain(
     if (p) touch(p, eco);
   }
   state.grains.push(g);
+  if (sky) sky.noteLaunch(g.id); // 打ち上げ: 地面から発つ
   return g;
 }
 
@@ -134,7 +135,11 @@ function addSticker(targetId: string, text: string): void {
 function closeGrains(ids: string[]): void {
   for (const id of ids) {
     const g = grainById(id);
-    if (g && g.status === 'alive') g.status = 'closed';
+    if (g && g.status === 'alive') {
+      sky.noteEntry(id); // 突入: 一瞬燃えて、惑星に積もる
+      g.status = 'closed';
+      g.closedAtWall = Date.now();
+    }
   }
   selection = selection.filter((id) => !ids.includes(id));
   sky.onSelectionChanged(selection);

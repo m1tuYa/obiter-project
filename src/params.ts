@@ -44,7 +44,11 @@ export const PARAMS = {
   // 温度は半径(外へ沈む)と文字の濃さで表現される
   SKY_ROTATION_PERIOD_SECONDS: 1200,
 
-  // ズームの範囲。最小=全天(点と塊の星空)、最大=地表寄り(全文で読む)
+  // ズームの範囲。最小=全天(点と塊の星空)、最大=地表(惑星の上端が画面中央、頭上に熱い粒)
   ZOOM_MIN: 0.35,
-  ZOOM_MAX: 2.5,
+  ZOOM_MAX: 3.4,
+
+  // 地表への遷移: このズームから惑星が沈み始め、FULLで地表視点が完成する
+  SURFACE_START_ZOOM: 1.5,
+  SURFACE_FULL_ZOOM: 2.9,
 };
