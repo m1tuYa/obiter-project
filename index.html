@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>orbiter</title>
+  </head>
+  <body>
+    <div id="topbar">
+      <button id="nav-now" class="nav active">今</button>
+      <button id="nav-search" class="nav">検索</button>
+      <span class="spacer"></span>
+      <button id="btn-export" class="ghost">書き出し</button>
+      <label class="ghost" id="btn-import-label">読み込み<input type="file" id="btn-import" accept=".json" hidden /></label>
+    </div>
+
+    <div id="field"></div>
+
+    <div id="thread" hidden>
+      <div id="thread-header">
+        <button id="thread-back" class="ghost">← 今へ</button>
+        <span id="thread-title"></span>
+      </div>
+      <div id="thread-list"></div>
+    </div>
+
+    <div id="search" hidden>
+      <input id="search-input" type="text" placeholder="全文検索（生死を問わず）" autocomplete="off" />
+      <div id="search-results"></div>
+    </div>
+
+    <div id="toolbar" hidden></div>
+
+    <form id="launcher" autocomplete="off">
+      <input id="launch-input" type="text" placeholder="打ち上げ（Enter）" />
+    </form>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
