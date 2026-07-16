@@ -519,6 +519,12 @@ export class Sky {
       });
     }
 
+    // ---- フォーカスの雲: 選択中は空全体に薄い闇がかかり、星座だけが浮かび上がる ----
+    if (focusedId) {
+      ctx.fillStyle = 'rgba(11, 14, 20, 0.62)';
+      ctx.fillRect(0, 0, cw, ch);
+    }
+
     // ---- 粒(星+逃げられるラベル) ----
     this.drawn = [];
     const placedRects: Bounds[] = [];
@@ -595,7 +601,9 @@ export class Sky {
       placedRects.push(bounds!);
 
       const rgb = p.question ? COLOR_ACCENT : COLOR_FG;
-      const alpha = p.selected ? 1 : p.alpha;
+      // 雲の下の星は淡い影として透ける(星座の縁者と選択粒だけが雲の上に出る)
+      const veilDim = focusedId && !p.focused && !p.relative ? 0.25 : 1;
+      const alpha = (p.selected ? 1 : p.alpha) * veilDim;
 
       // 打ち上げの航跡
       if (p.launching < 1) {
@@ -616,7 +624,7 @@ export class Sky {
       }
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.dotR, 0, 2 * Math.PI);
-      ctx.fillStyle = `rgba(${rgb}, ${Math.max(alpha, 0.5)})`;
+      ctx.fillStyle = `rgba(${rgb}, ${Math.max(p.selected ? 1 : p.alpha, 0.5) * veilDim})`;
       ctx.fill();
       ctx.shadowBlur = 0;
 
@@ -655,7 +663,7 @@ export class Sky {
         let ly = block.t;
         if (p.themeName && p.g.themeId) {
           ctx.font = `${nameFont}px ${FONT_STACK}`;
-          ctx.fillStyle = `rgba(${COLOR_THEME}, ${Math.min(1, alpha + 0.15)})`;
+          ctx.fillStyle = `rgba(${COLOR_THEME}, ${Math.min(1, (p.selected ? 1 : p.alpha) + 0.15) * veilDim})`;
           ctx.fillText(p.themeName, anchorX, ly);
           const w = ctx.measureText(p.themeName).width;
           const nx = align === 'left' ? anchorX : align === 'right' ? anchorX - w : anchorX - w / 2;
@@ -673,7 +681,7 @@ export class Sky {
         ctx.font = `${nameFont}px ${FONT_STACK}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillStyle = `rgba(${COLOR_THEME}, 0.75)`;
+        ctx.fillStyle = `rgba(${COLOR_THEME}, ${0.75 * veilDim})`;
         ctx.fillText(p.themeName, p.x, p.y + p.dotR + 3);
         const w = ctx.measureText(p.themeName).width;
         themeRect = { x: p.x - w / 2, y: p.y + p.dotR + 3, w, h: nameFont * 1.3, themeId: p.g.themeId };
@@ -683,7 +691,7 @@ export class Sky {
     }
 
     // ---- 軌道上の彗星: 全天まで引いたときだけ、外縁の遠くに見える ----
-    const rimAlpha = smoothstep(0.72 - this.zoom, 0, 0.2);
+    const rimAlpha = smoothstep(0.72 - this.zoom, 0, 0.2) * (focusedId ? 0.3 : 1);
     if (rimAlpha > 0.01) {
       const away = state.grains.filter((g) => g.status === 'alive' && g.cometReturnAtWall != null);
       for (const g of away) {
@@ -952,7 +960,11 @@ export class Sky {
         this.dragMoved = true;
       }
       if (this.pointerMode === 'dial') {
-        if (this.dragMoved) this.manualRot = this.downRot + (this.pointerAngle(e) - this.downAngle);
+        // フォーカス中の背景ドラッグはダイヤルではなくスワイプ航法(星座を渡る)
+        const focused = this.hooks.getSelection().length === 1;
+        if (this.dragMoved && !focused) {
+          this.manualRot = this.downRot + (this.pointerAngle(e) - this.downAngle);
+        }
       } else {
         this.dragX = e.offsetX;
         this.dragY = e.offsetY;
@@ -982,7 +994,19 @@ export class Sky {
         this.hooks.repositionGrain(grainId, storedAngle);
         return;
       }
-      if (moved) return;
+      if (moved) {
+        // スワイプ航法: フォーカス中、押した方向にリンクされた星があれば選択が渡る
+        const selection = this.hooks.getSelection();
+        if (mode === 'dial' && selection.length === 1) {
+          const dx = e.offsetX - this.downX;
+          const dy = e.offsetY - this.downY;
+          if (Math.hypot(dx, dy) > 48) {
+            const next = this.findRelativeInDirection(selection[0], Math.atan2(dy, dx));
+            if (next) this.hooks.setSelection([next]);
+          }
+        }
+        return;
+      }
 
       const hit = this.hitTest(e.offsetX, e.offsetY);
       const selection = this.hooks.getSelection();
@@ -1014,6 +1038,39 @@ export class Sky {
 
   private pointerAngle(e: PointerEvent): number {
     return Math.atan2(e.offsetY - this.lastCenterY, e.offsetX - this.lastCenterX);
+  }
+
+  // スワイプの方向に最も近い、選択粒の縁者(幹・リンク・付箋。生きているもの)を探す
+  private findRelativeInDirection(focusedId: string, swipeAngle: number): string | null {
+    const state = this.hooks.getState();
+    const g = state.grains.find((x) => x.id === focusedId);
+    const origin = this.project(focusedId);
+    if (!g || !origin) return null;
+
+    const relativeIds = new Set<string>();
+    for (const pid of g.parentIds) relativeIds.add(pid);
+    for (const lid of g.linkIds ?? []) relativeIds.add(lid);
+    for (const s of state.grains) {
+      if (s.attachedToId === g.id) relativeIds.add(s.id);
+      if ((s.linkIds ?? []).includes(g.id)) relativeIds.add(s.id);
+    }
+
+    let best: string | null = null;
+    let bestDiff = 1.15; // 約66度以内なら「その方向」とみなす
+    for (const id of relativeIds) {
+      const rel = state.grains.find((x) => x.id === id);
+      if (!rel || rel.status !== 'alive') continue;
+      const item = this.drawn.find((d) => d.g.id === id); // 幻影も含む(星座に出ている位置)
+      if (!item) continue;
+      const dir = Math.atan2(item.dotY - origin.y, item.dotX - origin.x);
+      let diff = Math.abs(dir - swipeAngle);
+      if (diff > Math.PI) diff = 2 * Math.PI - diff;
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = id;
+      }
+    }
+    return best;
   }
 
   private findGrainAt(x: number, y: number, excludeId: string): DrawnItem | null {
