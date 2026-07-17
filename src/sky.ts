@@ -70,7 +70,7 @@ function lerpAngle(a: number, b: number, t: number): number {
 
 export class Sky {
   private ctx: CanvasRenderingContext2D;
-  private zoom = 1;
+  private zoom = Math.min(P.ZOOM_MAX, Math.max(P.ZOOM_MIN, P.BOOT_ZOOM)); // 起動は地表から
   private manualRot = 0;
   private animT = 0;
   private lastFrame = 0;
@@ -315,6 +315,7 @@ export class Sky {
 
       const focused = g.id === focusedId;
       const relative = relativeIds.has(g.id);
+      const multiSelected = selection.length > 1 && selection.includes(g.id);
 
       let fontPx = tier.fontSizePx * fontScale;
       let alpha = tier.opacity;
@@ -325,6 +326,12 @@ export class Sky {
         alpha = 1;
         budget = Infinity;
         maxLines = 6;
+      } else if (multiSelected) {
+        // 合流の雲: 選ばれた粒たちは全文で読める(比べられなければ圧縮は書けない)
+        fontPx = Math.max(fontPx, 14);
+        alpha = 1;
+        budget = Infinity;
+        maxLines = 5;
       } else if (relative) {
         fontPx = Math.max(fontPx, 12);
         alpha = Math.max(alpha, 0.85);
@@ -519,8 +526,9 @@ export class Sky {
       });
     }
 
-    // ---- フォーカスの雲: 選択中は空全体に薄い闇がかかり、星座だけが浮かび上がる ----
-    if (focusedId) {
+    // ---- フォーカスの雲: 選択中は空全体に薄い闇がかかり、星座(または合流候補)だけが浮かび上がる ----
+    const veilActive = focusedId !== null || selection.length > 1;
+    if (veilActive) {
       ctx.fillStyle = 'rgba(11, 14, 20, 0.62)';
       ctx.fillRect(0, 0, cw, ch);
     }
@@ -533,8 +541,8 @@ export class Sky {
       placedRects.some((b) => a.l < b.r + GAP && b.l < a.r + GAP && a.t < b.b + GAP && b.t < a.b + GAP);
 
     const orderedPendings = [...pendings].sort((a, b) => {
-      const pa = a.focused ? 2 : a.relative ? 1 : 0;
-      const pb = b.focused ? 2 : b.relative ? 1 : 0;
+      const pa = a.focused ? 2 : a.selected || a.relative ? 1 : 0;
+      const pb = b.focused ? 2 : b.selected || b.relative ? 1 : 0;
       return pb - pa;
     });
 
@@ -601,8 +609,8 @@ export class Sky {
       placedRects.push(bounds!);
 
       const rgb = p.question ? COLOR_ACCENT : COLOR_FG;
-      // 雲の下の星は淡い影として透ける(星座の縁者と選択粒だけが雲の上に出る)
-      const veilDim = focusedId && !p.focused && !p.relative ? 0.25 : 1;
+      // 雲の下の星は淡い影として透ける(選択粒・星座の縁者・合流候補だけが雲の上に出る)
+      const veilDim = veilActive && !p.focused && !p.relative && !p.selected ? 0.25 : 1;
       const alpha = (p.selected ? 1 : p.alpha) * veilDim;
 
       // 打ち上げの航跡
@@ -691,7 +699,7 @@ export class Sky {
     }
 
     // ---- 軌道上の彗星: 全天まで引いたときだけ、外縁の遠くに見える ----
-    const rimAlpha = smoothstep(0.72 - this.zoom, 0, 0.2) * (focusedId ? 0.3 : 1);
+    const rimAlpha = smoothstep(0.72 - this.zoom, 0, 0.2) * (veilActive ? 0.3 : 1);
     if (rimAlpha > 0.01) {
       const away = state.grains.filter((g) => g.status === 'alive' && g.cometReturnAtWall != null);
       for (const g of away) {
@@ -1130,6 +1138,15 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number,
   const lines: string[] = [];
   let cur = '';
   for (const ch of text) {
+    if (ch === '\n') {
+      lines.push(cur);
+      cur = '';
+      if (lines.length === maxLines) {
+        lines[maxLines - 1] = lines[maxLines - 1] + '…';
+        return lines;
+      }
+      continue;
+    }
     if (ctx.measureText(cur + ch).width > maxWidth && cur.length > 0) {
       lines.push(cur);
       cur = ch;

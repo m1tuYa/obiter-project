@@ -2,7 +2,7 @@ import './style.css';
 import { PARAMS as P } from './params';
 import type { Grain, State, Theme } from './types';
 import { loadState, saveState, exportJson, parseImportedJson } from './store';
-import { cull, ensureAngles, hashAngle, isAwayComet, isOpenQuestion, touch } from './ecosystem';
+import { cull, ensureAngles, hashAngle, isAwayComet, isOpenQuestion, similarity, touch } from './ecosystem';
 import { buildSampleState } from './sample';
 import { Sky } from './sky';
 
@@ -28,6 +28,8 @@ let correctTargetId: string | null = null;
 let cometTargetId: string | null = null;
 let bandThemeId: string | null = null;
 let searchOpen = false;
+let echoTargetId: string | null = null;
+let lastClosedIds: string[] | null = null; // 直後のCtrl+Zで戻せる(誤爆の訂正)
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -35,7 +37,10 @@ const elEmptyHint = $('#empty-hint');
 const elActions = $('#actions');
 const elWriter = $<HTMLFormElement>('#writer');
 const elWriterContext = $('#writer-context');
-const elWriterInput = $<HTMLInputElement>('#writer-input');
+const elWriterInput = $<HTMLTextAreaElement>('#writer-input');
+const elEchoOverlay = $('#echo-overlay');
+const elEchoTitle = $('#echo-title');
+const elEchoResults = $('#echo-results');
 const elSearchOverlay = $('#search-overlay');
 const elSearchInput = $<HTMLInputElement>('#search-input');
 const elSearchResults = $('#search-results');
@@ -57,25 +62,25 @@ setInterval(() => {
   state.ecoSeconds = eco;
   if (checkCometReturns()) render();
   if (tickCount % 5 === 0 && cull(state, eco, Date.now())) render();
-  if (tickCount % 15 === 0) saveState(state);
+  if (tickCount % 15 === 0) persistState();
 }, 1000);
 
 window.addEventListener('beforeunload', () => {
   state.ecoSeconds = eco;
-  saveState(state);
+  persistState();
 });
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     state.ecoSeconds = eco;
-    saveState(state);
+    persistState();
   }
 });
 
 // ---------- 変異の共通処理 ----------
 function commit(): void {
   cull(state, eco, Date.now());
-  saveState(state);
+  persistState();
   sky.onSelectionChanged(selection);
   render();
 }
@@ -135,16 +140,33 @@ function addSticker(targetId: string, text: string): void {
 
 // 閉幕: 印一つ。即時退場。一言は求めない(殺す操作は軽く)
 function closeGrains(ids: string[]): void {
+  const done: string[] = [];
   for (const id of ids) {
     const g = grainById(id);
     if (g && g.status === 'alive') {
       sky.noteEntry(id); // 突入: 一瞬燃えて、惑星に積もる
       g.status = 'closed';
       g.closedAtWall = Date.now();
+      done.push(id);
     }
   }
+  if (done.length > 0) lastClosedIds = done;
   selection = selection.filter((id) => !ids.includes(id));
   sky.onSelectionChanged(selection);
+  commit();
+}
+
+// 直前の閉幕を戻す(蘇生ではなく、手が滑ったことへの訂正)
+function undoClose(): void {
+  if (!lastClosedIds) return;
+  for (const id of lastClosedIds) {
+    const g = grainById(id);
+    if (g && g.status === 'closed') {
+      g.status = 'alive';
+      g.closedAtWall = undefined;
+    }
+  }
+  lastClosedIds = null;
   commit();
 }
 
@@ -170,7 +192,7 @@ function checkCometReturns(): boolean {
       changed = true;
     }
   }
-  if (changed) saveState(state);
+  if (changed) persistState();
   return changed;
 }
 
@@ -282,7 +304,7 @@ function linkGrains(childId: string, targetId: string): void {
   if (typeof target.angle === 'number') {
     child.angle = target.angle + (Math.random() - 0.5) * 0.5;
   }
-  saveState(state);
+  persistState();
   render();
 }
 
@@ -291,7 +313,7 @@ function repositionGrain(grainId: string, angle: number): void {
   const g = grainById(grainId);
   if (!g) return;
   g.angle = angle;
-  saveState(state);
+  persistState();
 }
 
 // 蘇生: 一言が必須(生かす操作は重く)
@@ -342,6 +364,7 @@ function closeWriter(): void {
   correctTargetId = null;
   cometTargetId = null;
   elWriterInput.value = '';
+  elWriterInput.style.height = 'auto';
   elWriter.hidden = true;
 }
 
@@ -384,8 +407,13 @@ function updateWriterContext(): void {
 }
 
 elWriterInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && e.isComposing) {
-    e.preventDefault();
+  // Enter=打ち上げ、Shift+Enter=改行(一呼吸の長さは行数ではなく本人が決める)
+  if (e.key === 'Enter') {
+    if (e.isComposing) return;
+    if (!e.shiftKey) {
+      e.preventDefault();
+      elWriter.requestSubmit();
+    }
     return;
   }
   if (e.key === 'Escape') {
@@ -401,6 +429,12 @@ elWriterInput.addEventListener('keydown', (e) => {
   }
 });
 
+// 入力量に合わせて静かに伸びる
+elWriterInput.addEventListener('input', () => {
+  elWriterInput.style.height = 'auto';
+  elWriterInput.style.height = `${elWriterInput.scrollHeight}px`;
+});
+
 elWriter.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = elWriterInput.value.trim();
@@ -410,6 +444,7 @@ elWriter.addEventListener('submit', (e) => {
     case 'launch': {
       newGrain(text);
       elWriterInput.value = '';
+      elWriterInput.style.height = 'auto';
       commit();
       break;
     }
@@ -422,6 +457,7 @@ elWriter.addEventListener('submit', (e) => {
       selection = [created.id]; // 思考の連鎖: 参照系は書いた粒に移る
       sky.onSelectionChanged(selection);
       elWriterInput.value = '';
+      elWriterInput.style.height = 'auto';
       writerMode = 'child';
       commit();
       updateWriterContext();
@@ -437,6 +473,7 @@ elWriter.addEventListener('submit', (e) => {
       selection = [created.id];
       sky.onSelectionChanged(selection);
       elWriterInput.value = '';
+      elWriterInput.style.height = 'auto';
       writerMode = 'child';
       commit();
       updateWriterContext();
@@ -447,6 +484,7 @@ elWriter.addEventListener('submit', (e) => {
         const tip = themeTip(bandThemeId);
         newGrain(text, { parents: tip ? [tip.id] : [], themeId: bandThemeId });
         elWriterInput.value = '';
+        elWriterInput.style.height = 'auto';
         commit();
       }
       break;
@@ -460,7 +498,7 @@ elWriter.addEventListener('submit', (e) => {
       if (correctTargetId) {
         const g = grainById(correctTargetId);
         if (g) g.text = text; // 編集は訂正専用。時計は巻き戻さない
-        saveState(state);
+        persistState();
         render();
       }
       closeWriter();
@@ -547,6 +585,8 @@ function renderGlyphs(): void {
       openWriter('comet');
     });
     sep();
+    glyph('残響', '', () => openEcho(g.id));
+    sep();
     glyph('訂正', '', () => beginCorrect(g.id));
     if (g.cometPeriodDays) {
       sep();
@@ -631,6 +671,139 @@ function renderBand(): void {
 $('#band-close').addEventListener('click', () => closeBand());
 
 // ============================================================
+// 残響: 選択粒に似た過去の粒。求めたときだけ計算される(保存しない)
+// ============================================================
+
+function openEcho(grainId: string): void {
+  const g = grainById(grainId);
+  if (!g) return;
+  echoTargetId = grainId;
+  elEchoOverlay.hidden = false;
+  closeWriter();
+  renderEcho();
+}
+
+function closeEcho(): void {
+  echoTargetId = null;
+  elEchoOverlay.hidden = true;
+  elEchoResults.innerHTML = '';
+}
+
+elEchoOverlay.addEventListener('click', (e) => {
+  if (e.target === elEchoOverlay) closeEcho();
+});
+
+function renderEcho(): void {
+  if (!echoTargetId) return;
+  const g = grainById(echoTargetId);
+  if (!g) {
+    closeEcho();
+    return;
+  }
+  elEchoTitle.textContent = `残響 — 「${clip(g.text, 24)}」に似た粒`;
+  elEchoResults.innerHTML = '';
+
+  const hits = state.grains
+    .filter((x) => x.id !== g.id)
+    .map((x) => ({ g: x, score: similarity(g.text, x.text) }))
+    .filter((x) => x.score >= P.ECHO_MIN_SIMILARITY)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, P.ECHO_MAX_RESULTS);
+
+  if (hits.length === 0) {
+    const empty = document.createElement('div');
+    empty.id = 'echo-empty';
+    empty.textContent = '静かです。この粒に似た響きはまだ眠っていません';
+    elEchoResults.appendChild(empty);
+    return;
+  }
+
+  for (const { g: hit } of hits) {
+    const div = document.createElement('div');
+    div.className = 'result';
+    if (hit.status !== 'alive') div.classList.add('dead');
+
+    const text = document.createElement('div');
+    text.className = 'r-text';
+    text.textContent = hit.text;
+    div.appendChild(text);
+
+    const meta = document.createElement('div');
+    meta.className = 'r-meta';
+    const status = document.createElement('span');
+    status.textContent = hit.status === 'alive' ? '生' : hit.status === 'drifted' ? '漂流' : '閉幕';
+    meta.appendChild(status);
+    const date = document.createElement('span');
+    date.textContent = fmtDate(hit.createdAtWall);
+    meta.appendChild(date);
+    if (hit.themeId) {
+      const theme = themeById(hit.themeId);
+      if (theme) {
+        const link = document.createElement('span');
+        link.className = 'r-theme-link';
+        link.textContent = theme.name;
+        link.addEventListener('click', () => {
+          closeEcho();
+          openBand(theme.id);
+        });
+        meta.appendChild(link);
+      }
+    }
+    if (hit.closedNote) {
+      const note = document.createElement('span');
+      note.className = 'r-note';
+      note.textContent = `「${hit.closedNote}」`;
+      meta.appendChild(note);
+    }
+
+    // 行為: 生きていれば選択が移れる。どの縁ともリンク(細い幹)を張れる
+    const act = (label: string, fn: () => void): void => {
+      const a = document.createElement('span');
+      a.className = 'r-act';
+      a.textContent = label;
+      a.addEventListener('click', fn);
+      meta.appendChild(a);
+    };
+    if (hit.status === 'alive' && !isAwayComet(hit)) {
+      act('選択', () => {
+        closeEcho();
+        setSelection([hit.id]);
+      });
+    }
+    act('リンク', () => {
+      if (echoTargetId) linkGrains(echoTargetId, hit.id);
+      closeEcho();
+    });
+    div.appendChild(meta);
+
+    if (hit.status !== 'alive') {
+      const box = document.createElement('div');
+      box.className = 'revive-box';
+      const input = document.createElement('input');
+      input.placeholder = 'なぜ戻すか(必須)';
+      const go = document.createElement('span');
+      go.className = 'revive-go';
+      go.textContent = '蘇生';
+      go.addEventListener('click', () => {
+        if (revive(hit.id, input.value)) renderEcho();
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.isComposing) {
+          e.preventDefault();
+          if (revive(hit.id, input.value)) renderEcho();
+        }
+        if (e.key === 'Escape') e.stopPropagation();
+      });
+      box.appendChild(input);
+      box.appendChild(go);
+      div.appendChild(box);
+    }
+
+    elEchoResults.appendChild(div);
+  }
+}
+
+// ============================================================
 // 検索(/で召喚)
 // ============================================================
 
@@ -669,13 +842,14 @@ function renderSearch(): void {
   elSearchResults.innerHTML = '';
   if (!q) return;
 
+  // スペース区切りはAND。本文・閉幕/蘇生の一言・テーマ名を横断する
+  const terms = q.split(/[\s　]+/).filter(Boolean);
   const hits = state.grains
-    .filter(
-      (g) =>
-        g.text.toLowerCase().includes(q) ||
-        (g.closedNote ?? '').toLowerCase().includes(q) ||
-        (g.revivedNote ?? '').toLowerCase().includes(q),
-    )
+    .filter((g) => {
+      const themeName = g.themeId ? (themeById(g.themeId)?.name ?? '') : '';
+      const hay = `${g.text} ${g.closedNote ?? ''} ${g.revivedNote ?? ''} ${themeName}`.toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    })
     .sort((a, b) => b.createdAtWall - a.createdAtWall)
     .slice(0, 100);
 
@@ -762,7 +936,7 @@ function renderSearch(): void {
           const v = window.prompt('どう閉じたか(任意):');
           if (v && v.trim()) {
             g.closedNote = v.trim();
-            saveState(state);
+            persistState();
             renderSearch();
           }
         });
@@ -787,11 +961,18 @@ document.addEventListener('keydown', (e) => {
     openSearch();
     return;
   }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) {
+    e.preventDefault();
+    undoClose();
+    return;
+  }
   if (e.ctrlKey || e.metaKey || e.altKey || typing) return;
 
   if (e.key === 'Escape') {
-    // 段階後退: 検索/帯 → 選択
-    if (searchOpen) {
+    // 段階後退: 残響 → 検索/帯 → 選択
+    if (echoTargetId) {
+      closeEcho();
+    } else if (searchOpen) {
       closeSearch();
     } else if (bandThemeId) {
       closeBand();
@@ -868,7 +1049,7 @@ $<HTMLInputElement>('#menu-import').addEventListener('change', async (e) => {
   sky.onSelectionChanged([]);
   checkCometReturns();
   cull(state, eco, Date.now());
-  saveState(state);
+  persistState();
   render();
   (e.target as HTMLInputElement).value = '';
 });
@@ -887,7 +1068,7 @@ function loadSample(needConfirm: boolean): void {
   sky.onSelectionChanged([]);
   checkCometReturns();
   cull(state, eco, Date.now());
-  saveState(state);
+  persistState();
   render();
 }
 
@@ -902,6 +1083,91 @@ function render(): void {
   renderGlyphs();
   if (bandThemeId) renderBand();
   if (searchOpen) renderSearch();
+}
+
+// ============================================================
+// 保存とローカルサーバ(射出台)
+// ============================================================
+
+// 保存の一元化: localStorage(常時) + ローカルサーバ(届くときだけ、静かに)
+function persistState(): void {
+  state.ecoSeconds = eco;
+  saveState(state);
+  pushServerState();
+}
+
+let serverMode = false;
+let pushTimer: number | null = null;
+
+function pushServerState(): void {
+  if (!serverMode) return;
+  if (pushTimer !== null) clearTimeout(pushTimer);
+  pushTimer = window.setTimeout(() => {
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state),
+    }).catch(() => {});
+  }, 800);
+}
+
+// サーバが居れば同期モードへ。サーバ側の空が進んでいれば乗り換える
+async function initServer(): Promise<void> {
+  try {
+    const res = await fetch('/api/state');
+    serverMode = true;
+    if (res.ok) {
+      const remote = parseImportedJson(await res.text());
+      if (remote && remote.ecoSeconds > state.ecoSeconds) {
+        state = remote;
+        ensureAngles(state);
+        eco = state.ecoSeconds;
+        checkCometReturns();
+        cull(state, eco, Date.now());
+        render();
+      }
+    }
+    persistState();
+    await pullLaunches();
+  } catch {
+    serverMode = false;
+  }
+}
+
+// 射出台(スマホ)から打ち上がった粒を取り込む。帰還のたびに空に積もる
+async function pullLaunches(): Promise<void> {
+  if (!serverMode) return;
+  try {
+    const res = await fetch('/api/launches');
+    if (!res.ok) return;
+    const items: unknown = await res.json();
+    if (!Array.isArray(items) || items.length === 0) return;
+    for (const it of items) {
+      const text = typeof (it as { text?: unknown })?.text === 'string' ? (it as { text: string }).text.trim() : '';
+      if (!text) continue;
+      const g = newGrain(text); // 全部無所属で打ち上げ(出先での分類判断は置かない)
+      const wall = (it as { createdAtWall?: unknown }).createdAtWall;
+      if (typeof wall === 'number') g.createdAtWall = wall;
+    }
+    await fetch('/api/launches/clear', { method: 'POST' });
+    commit();
+  } catch {
+    /* サーバ不在は静かに無視 */
+  }
+}
+
+window.addEventListener('focus', () => {
+  void pullLaunches();
+});
+
+// 24時間ごとの自動バックアップ(データ消失は検証の致命傷)
+function autoBackup(): void {
+  const KEY = 'orbiter.lastBackupAtWall';
+  const last = Number(localStorage.getItem(KEY) ?? 0);
+  if (state.grains.length > 0 && Date.now() - last > 86400000) {
+    exportJson(state);
+    localStorage.setItem(KEY, String(Date.now()));
+  }
 }
 
 // ---------- ユーティリティ ----------
@@ -929,5 +1195,7 @@ sky = new Sky($<HTMLCanvasElement>('#sky-canvas'), {
 });
 checkCometReturns(); // 不在中に帰還日を迎えた彗星を戻す
 cull(state, eco, Date.now()); // 前回終了後の状態でも規律を守らせてから描画
-saveState(state);
+persistState();
+autoBackup();
+void initServer();
 render();

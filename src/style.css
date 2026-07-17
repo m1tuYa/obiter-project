@@ -117,9 +117,13 @@ body {
   border-bottom: 1px solid var(--line);
   color: var(--fg);
   font-size: 15px;
+  font-family: inherit;
+  line-height: 1.55;
   padding: 8px 4px;
   outline: none;
   text-align: left;
+  resize: none;
+  overflow-y: hidden;
   transition: border-color 0.2s ease;
 }
 #writer-input:focus { border-bottom-color: var(--line-bright); }
@@ -195,6 +199,43 @@ body {
   margin-top: 3px;
 }
 .result .closed-note-add:hover { color: var(--dim); }
+
+/* ---------- 残響 ---------- */
+#echo-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(11, 14, 20, 0.84);
+  backdrop-filter: blur(3px);
+  animation: fade 0.2s ease;
+  overflow-y: auto;
+}
+#echo-box {
+  max-width: 600px;
+  margin: 14vh auto 0;
+  padding: 0 24px 15vh;
+}
+#echo-title {
+  color: var(--dim);
+  font-size: 13px;
+  letter-spacing: 1px;
+  text-align: center;
+  line-height: 1.6;
+  margin-bottom: 32px;
+}
+#echo-results .r-act {
+  color: var(--faint);
+  font-size: 12px;
+  cursor: pointer;
+  letter-spacing: 1px;
+}
+#echo-results .r-act:hover { color: var(--fg); }
+#echo-empty {
+  text-align: center;
+  color: var(--faint);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
 
 /* ---------- テーマの尾(帯) ---------- */
 #band {

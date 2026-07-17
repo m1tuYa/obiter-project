@@ -131,6 +131,24 @@ export function hashJitter(id: string): number {
   return ((((hashOf(id) >>> 8) % 100) - 50) / 100) * 0.6;
 }
 
+// 残響: 意味的関連は保存せず、求められたときだけ計算する(概念文書の明文規定)。
+// 文字2-gramのDice係数による単純な字面の類似。AIは使わない
+export function similarity(a: string, b: string): number {
+  const A = bigrams(a);
+  const B = bigrams(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  return (2 * inter) / (A.size + B.size);
+}
+
+function bigrams(s: string): Set<string> {
+  const t = s.replace(/[\s、。?？!！]/g, '');
+  const out = new Set<string>();
+  for (let i = 0; i < t.length - 1; i++) out.add(t.slice(i, i + 2));
+  return out;
+}
+
 export function tierOf(effAge: number): { fontSizePx: number; opacity: number } {
   for (const t of P.DISPLAY_TIERS) {
     if (effAge <= t.upToSeconds) return t;

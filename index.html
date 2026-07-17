@@ -20,8 +20,16 @@
     <!-- 書く行(打ち始めると浮かび上がる) -->
     <form id="writer" hidden autocomplete="off">
       <div id="writer-context"></div>
-      <input id="writer-input" type="text" autocomplete="off" />
+      <textarea id="writer-input" rows="1" autocomplete="off"></textarea>
     </form>
+
+    <!-- 残響: 選択粒に似た過去の粒(求めたときだけ計算される) -->
+    <div id="echo-overlay" hidden>
+      <div id="echo-box">
+        <div id="echo-title"></div>
+        <div id="echo-results"></div>
+      </div>
+    </div>
 
     <!-- 検索(/で召喚) -->
     <div id="search-overlay" hidden>
@@ -57,6 +65,8 @@
           <div>星を空へ落とす = 位置調整</div>
           <div>惑星へ落とす / Delete = 閉幕</div>
           <div>彗星 = 選択→グリフ(日付で戻る)</div>
+          <div>残響 = 選択→グリフ(似た粒を呼ぶ)</div>
+          <div>Ctrl+Z = 直前の閉幕を戻す</div>
           <div>ホイール = ズーム</div>
         </div>
       </div>

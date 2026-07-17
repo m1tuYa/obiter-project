@@ -51,4 +51,11 @@ export const PARAMS = {
   // 地表への遷移: このズームから惑星が沈み始め、FULLで地表視点が完成する
   SURFACE_START_ZOOM: 1.5,
   SURFACE_FULL_ZOOM: 2.9,
+
+  // 起動時のズーム。起動は常に地表から(着地=再開)
+  BOOT_ZOOM: 3.0,
+
+  // 残響: 似た粒とみなす類似度(文字2-gramのDice係数)の下限と表示数
+  ECHO_MIN_SIMILARITY: 0.16,
+  ECHO_MAX_RESULTS: 10,
 };
